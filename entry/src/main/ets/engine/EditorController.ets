@@ -14,13 +14,18 @@
  *   previous committed centre is kept.
  * - Public getters return copies, never internal mutable references.
  *
- * M1 deliberately contains no history, persistence, plan CRUD, collision
- * warnings or layout-issue integration.
+ * M2-A01 adds a 50-operation undo/redo snapshot history and a formal BoothPlan
+ * import/export path while keeping the M1 demo constructor and geometry
+ * behaviour unchanged. M2-A02 adds a pure layout-issue getter and rejects
+ * blocked-area placements for add/move/rotate/endDrag. Persistence and plan
+ * repositories remain outside this file.
  */
 
 import {
+  BoothPlan,
   BoothTemplate,
   CatalogItem,
+  LayoutIssue,
   OperationCode,
   OperationResult,
   PlacedObject,
@@ -35,8 +40,11 @@ import {
   getFootprintRect,
   hitTestObjects,
   isWithinBounds,
-  isValidRotation
+  isValidRotation,
+  overlapsPositive
 } from './GeometryEngine';
+import { canPlace, validateLayout } from './LayoutValidator';
+import { cloneHistoryObjects, HistoryEntry, HistoryManager } from './HistoryManager';
 
 const INITIAL_TEMPLATE_ID: string = 'standard';
 const INITIAL_CATALOG_ID: string = 'display_table';
@@ -102,6 +110,26 @@ function cloneTemplate(template: BoothTemplate): BoothTemplate {
   return copy;
 }
 
+/**
+ * Fully validated, isolated payload produced by importPlan validation. State is
+ * only assigned after the whole payload passes, so a rejected plan cannot
+ * partially mutate the controller.
+ */
+interface ValidatedPlanData {
+  id: string;
+  name: string;
+  template: BoothTemplate;
+  objects: PlacedObject[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+const PLAN_NAME_MAX_LENGTH: number = 30;
+/** Largest instance counter we may safely increment by one without precision loss. */
+const MAX_SAFE_INSTANCE_NUMBER: number = 9007199254740991;
+/** Numeric suffixes longer than this are not used to seed the allocator. */
+const MAX_SEEDABLE_ID_SUFFIX_LENGTH: number = 15;
+
 function nextRotation(rotation: Rotation): Rotation {
   if (rotation === 0) {
     return 90;
@@ -124,6 +152,17 @@ export class EditorController {
   private dragOffsetX: number = 0;
   private dragOffsetY: number = 0;
   private nextInstanceNumber: number = 1;
+  private history: HistoryManager = new HistoryManager();
+  private planId: string | null = null;
+  private planName: string = '';
+  private planCreatedAt: number = 0;
+  private planUpdatedAt: number = 0;
+  /**
+   * Monotonic revision of effective committed changes in this session. It is
+   * the change-notification signal; updatedAt is only persisted metadata and
+   * may be unable to advance at very large finite values.
+   */
+  private changeRevision: number = 0;
 
   /**
    * Creates a session for an existing template and seeds the M1 sample object:
@@ -178,6 +217,15 @@ export class EditorController {
     return clonePlacedObjects(this.objects);
   }
 
+  /**
+   * Computes layout issues from the current committed objects on every call.
+   * Preview/selection state is never inspected, so the result cannot be stale
+   * with respect to committed state. This getter changes nothing.
+   */
+  getLayoutIssues(): LayoutIssue[] {
+    return validateLayout(this.template, this.objects);
+  }
+
   getSelectedId(): string | null {
     return this.selectedId;
   }
@@ -206,6 +254,30 @@ export class EditorController {
 
   isDragging(): boolean {
     return this.dragging;
+  }
+
+  /** Id of the currently imported formal plan, or null for the M1 demo. */
+  getPlanId(): string | null {
+    return this.planId;
+  }
+
+  /**
+   * Monotonic revision for the current editing session. It advances exactly
+   * once per effective committed operation (add/move/rotate/remove/endDrag,
+   * undo, redo) and is reset by importPlan. A fresh import does not advance it.
+   */
+  getChangeRevision(): number {
+    return this.changeRevision;
+  }
+
+  /** True when at least one effective operation can be undone. */
+  canUndo(): boolean {
+    return this.history.canUndo();
+  }
+
+  /** True when a previously undone operation can be redone. */
+  canRedo(): boolean {
+    return this.history.canRedo();
   }
 
   /** Looks up a catalog item through the frozen catalog module. */
@@ -303,24 +375,22 @@ export class EditorController {
     }
 
     const candidate: PlacedObject = {
-      id: INSTANCE_ID_PREFIX + this.nextInstanceNumber,
+      id: '',
       catalogId: catalog.id,
       centerX: center.x,
       centerY: center.y,
       rotation: 0,
       zIndex: this.nextZIndex()
     };
-    const footprint: OperationResult<Rect> = getFootprintRect(candidate, catalog);
-    if (footprint.code !== 'OK' || footprint.data === undefined) {
-      return this.failure<PlacedObject>(footprint.code, footprint.message);
-    }
-    if (!isWithinBounds(footprint.data, this.template.widthCm, this.template.heightCm)) {
-      return this.failure<PlacedObject>('OUT_OF_BOUNDS',
-        'The object footprint would leave the booth bounds.');
+    const placement: OperationResult<boolean> = canPlace(this.template, candidate);
+    if (placement.code !== 'OK' || placement.data !== true) {
+      return this.failure<PlacedObject>(placement.code, placement.message);
     }
 
+    const before: PlacedObject[] = clonePlacedObjects(this.objects);
+    candidate.id = this.allocateInstanceId();
     this.objects.push(candidate);
-    this.nextInstanceNumber++;
+    this.recordEffectiveChange(before);
     const result: OperationResult<PlacedObject> = {
       code: 'OK',
       message: 'Object added.',
@@ -350,17 +420,24 @@ export class EditorController {
     if (catalog === undefined) {
       return this.failure<PlacedObject>('NOT_FOUND', 'Object references an unknown catalog id.');
     }
-    const footprint: OperationResult<Rect> = getFootprintRect(candidate, catalog);
-    if (footprint.code !== 'OK' || footprint.data === undefined) {
-      return this.failure<PlacedObject>(footprint.code, footprint.message);
-    }
-    if (!isWithinBounds(footprint.data, this.template.widthCm, this.template.heightCm)) {
-      return this.failure<PlacedObject>('OUT_OF_BOUNDS',
-        'The object footprint would leave the booth bounds.');
+    const placement: OperationResult<boolean> = canPlace(this.template, candidate);
+    if (placement.code !== 'OK' || placement.data !== true) {
+      return this.failure<PlacedObject>(placement.code, placement.message);
     }
 
+    if (this.objects[index].centerX === center.x && this.objects[index].centerY === center.y) {
+      const unchanged: OperationResult<PlacedObject> = {
+        code: 'OK',
+        message: 'Object already at the requested centre; no history entry recorded.',
+        data: clonePlacedObject(this.objects[index])
+      };
+      return unchanged;
+    }
+
+    const before: PlacedObject[] = clonePlacedObjects(this.objects);
     this.objects[index].centerX = center.x;
     this.objects[index].centerY = center.y;
+    this.recordEffectiveChange(before);
     const result: OperationResult<PlacedObject> = {
       code: 'OK',
       message: 'Object moved.',
@@ -394,20 +471,47 @@ export class EditorController {
     if (catalog === undefined) {
       return this.failure<PlacedObject>('NOT_FOUND', 'Object references an unknown catalog id.');
     }
-    const footprint: OperationResult<Rect> = getFootprintRect(candidate, catalog);
-    if (footprint.code !== 'OK' || footprint.data === undefined) {
-      return this.failure<PlacedObject>(footprint.code, footprint.message);
-    }
-    if (!isWithinBounds(footprint.data, this.template.widthCm, this.template.heightCm)) {
-      return this.failure<PlacedObject>('OUT_OF_BOUNDS',
-        'The rotated footprint would leave the booth bounds.');
+    const placement: OperationResult<boolean> = canPlace(this.template, candidate);
+    if (placement.code !== 'OK' || placement.data !== true) {
+      return this.failure<PlacedObject>(placement.code, placement.message);
     }
 
+    const before: PlacedObject[] = clonePlacedObjects(this.objects);
     this.objects[index].rotation = candidate.rotation;
+    this.recordEffectiveChange(before);
     const result: OperationResult<PlacedObject> = {
       code: 'OK',
       message: 'Object rotated 90 degrees clockwise.',
       data: clonePlacedObject(this.objects[index])
+    };
+    return result;
+  }
+
+  /**
+   * Removes a committed object. A missing id is NOT_FOUND and does not touch
+   * history. The returned payload is a copy of the removed object, so undo can
+   * restore the exact id/catalog/centre/rotation/zIndex snapshot.
+   */
+  removeObject(id: string): OperationResult<PlacedObject> {
+    if (this.dragging) {
+      return this.failure<PlacedObject>('INVALID_ARGUMENT',
+        'Objects cannot be removed during a drag.');
+    }
+    const index: number = this.findObjectIndex(id);
+    if (index < 0) {
+      return this.failure<PlacedObject>('NOT_FOUND', 'No placed object with id: ' + id);
+    }
+    const before: PlacedObject[] = clonePlacedObjects(this.objects);
+    const removed: PlacedObject = clonePlacedObject(this.objects[index]);
+    this.objects.splice(index, 1);
+    if (this.selectedId === id) {
+      this.selectedId = null;
+    }
+    this.recordEffectiveChange(before);
+    const result: OperationResult<PlacedObject> = {
+      code: 'OK',
+      message: 'Object removed.',
+      data: removed
     };
     return result;
   }
@@ -517,20 +621,24 @@ export class EditorController {
       this.clearDragState();
       return this.failure<PlacedObject>('NOT_FOUND', 'Object references an unknown catalog id.');
     }
-    const footprint: OperationResult<Rect> = getFootprintRect(preview, catalog);
-    if (footprint.code !== 'OK' || footprint.data === undefined) {
+    const placement: OperationResult<boolean> = canPlace(this.template, preview);
+    if (placement.code !== 'OK' || placement.data !== true) {
       this.clearDragState();
-      return this.failure<PlacedObject>(footprint.code, footprint.message);
-    }
-    if (!isWithinBounds(footprint.data, this.template.widthCm, this.template.heightCm)) {
-      this.clearDragState();
-      return this.failure<PlacedObject>('OUT_OF_BOUNDS',
-        'Drag ended outside the booth bounds; the last committed centre was kept.');
+      return this.failure<PlacedObject>(placement.code,
+        placement.code === 'OUT_OF_BOUNDS' ?
+          'Drag ended outside the allowed placement; the last committed centre was kept.' :
+          placement.message);
     }
 
+    const changed: boolean = this.objects[index].centerX !== preview.centerX ||
+      this.objects[index].centerY !== preview.centerY;
+    const before: PlacedObject[] = changed ? clonePlacedObjects(this.objects) : [];
     this.objects[index].centerX = preview.centerX;
     this.objects[index].centerY = preview.centerY;
     this.clearDragState();
+    if (changed) {
+      this.recordEffectiveChange(before);
+    }
     const result: OperationResult<PlacedObject> = {
       code: 'OK',
       message: 'Drag committed.',
@@ -554,8 +662,352 @@ export class EditorController {
   }
 
   // ------------------------------------------------------------------
+  // Undo / redo
+  // ------------------------------------------------------------------
+
+  /**
+   * Restores the complete object array saved before the newest effective
+   * operation. Returns NO_HISTORY without changing state when unavailable.
+   * Undo/redo are rejected while a drag preview is active.
+   */
+  undo(): OperationResult<PlacedObject[]> {
+    if (this.dragging) {
+      return this.failure<PlacedObject[]>('INVALID_ARGUMENT',
+        'Undo is not available during a drag.');
+    }
+    const entry: HistoryEntry | null = this.history.undo();
+    if (entry === null) {
+      return this.failure<PlacedObject[]>('NO_HISTORY', 'Nothing to undo.');
+    }
+    this.objects = cloneHistoryObjects(entry.before);
+    this.reconcileSelection();
+    this.touchFormalPlanUpdatedAt();
+    this.changeRevision = this.changeRevision + 1;
+    const result: OperationResult<PlacedObject[]> = {
+      code: 'OK',
+      message: 'Undo applied.',
+      data: clonePlacedObjects(this.objects)
+    };
+    return result;
+  }
+
+  /** Re-applies the after snapshot of the newest undone operation. */
+  redo(): OperationResult<PlacedObject[]> {
+    if (this.dragging) {
+      return this.failure<PlacedObject[]>('INVALID_ARGUMENT',
+        'Redo is not available during a drag.');
+    }
+    const entry: HistoryEntry | null = this.history.redo();
+    if (entry === null) {
+      return this.failure<PlacedObject[]>('NO_HISTORY', 'Nothing to redo.');
+    }
+    this.objects = cloneHistoryObjects(entry.after);
+    this.reconcileSelection();
+    this.touchFormalPlanUpdatedAt();
+    this.changeRevision = this.changeRevision + 1;
+    const result: OperationResult<PlacedObject[]> = {
+      code: 'OK',
+      message: 'Redo applied.',
+      data: clonePlacedObjects(this.objects)
+    };
+    return result;
+  }
+
+  // ------------------------------------------------------------------
+  // Formal BoothPlan import / export
+  // ------------------------------------------------------------------
+
+  /**
+   * Replaces the whole formal-plan state with a validated plan. Validation and
+   * cloning complete before any state is touched, so a rejected import leaves
+   * the current plan, objects, selection, drag and history exactly intact.
+   * On success the imported objects are the only committed objects (no demo
+   * seed table) and selection/drag/history are cleared.
+   */
+  importPlan(plan: BoothPlan): OperationResult<BoothPlan> {
+    const validated: OperationResult<ValidatedPlanData> = this.validatePlan(plan);
+    if (validated.code !== 'OK' || validated.data === undefined) {
+      return this.failure<BoothPlan>(validated.code, validated.message);
+    }
+    const data: ValidatedPlanData = validated.data;
+
+    this.template = data.template;
+    this.objects = clonePlacedObjects(data.objects);
+    this.planId = data.id;
+    this.planName = data.name;
+    this.planCreatedAt = data.createdAt;
+    this.planUpdatedAt = data.updatedAt;
+    this.selectedId = null;
+    this.clearDragState();
+    this.history.clear();
+    this.changeRevision = 0;
+    this.ensureAllocatorPastExisting();
+    return this.exportPlan();
+  }
+
+  /**
+   * Returns an independent committed snapshot of the formal plan. Demo
+   * controllers (constructor-only M1 sessions) have no plan id and return
+   * INVALID_ARGUMENT. Reading never changes updatedAt.
+   */
+  exportPlan(): OperationResult<BoothPlan> {
+    const id: string | null = this.planId;
+    if (id === null) {
+      return this.failure<BoothPlan>('INVALID_ARGUMENT',
+        'No formal plan is open; import a plan before exporting.');
+    }
+    const plan: BoothPlan = {
+      id: id,
+      name: this.planName,
+      templateId: this.template.id,
+      objects: clonePlacedObjects(this.objects),
+      createdAt: this.planCreatedAt,
+      updatedAt: this.planUpdatedAt
+    };
+    const result: OperationResult<BoothPlan> = {
+      code: 'OK',
+      message: 'Formal plan exported.',
+      data: plan
+    };
+    return result;
+  }
+
+  // ------------------------------------------------------------------
   // Internal helpers
   // ------------------------------------------------------------------
+
+  /**
+   * Records exactly one effective operation and advances the formal plan
+   * timestamp. Callers must pass a deep copy of the pre-operation objects.
+   */
+  private recordEffectiveChange(before: PlacedObject[]): void {
+    this.history.record(before, this.objects);
+    this.touchFormalPlanUpdatedAt();
+    this.changeRevision = this.changeRevision + 1;
+  }
+
+  /**
+   * updatedAt is persisted metadata only; change notification uses
+   * changeRevision. It changes only on effective committed operations, undo
+   * and redo. Demo sessions have no formal plan and keep their placeholder
+   * timestamps. The value stays finite and never decreases. At or above 2^53
+   * adding 1 may be a no-op in IEEE754, so an unchanged finite value here is
+   * preserved rather than replaced.
+   */
+  private touchFormalPlanUpdatedAt(): void {
+    if (this.planId === null) {
+      return;
+    }
+    const now: number = Date.now();
+    if (Number.isFinite(now) && now > this.planUpdatedAt) {
+      this.planUpdatedAt = now;
+      return;
+    }
+    const next: number = this.planUpdatedAt + 1;
+    if (Number.isFinite(next)) {
+      this.planUpdatedAt = next;
+    }
+  }
+
+  /** Keeps selection only when the restored object still exists. */
+  private reconcileSelection(): void {
+    const selectedId: string | null = this.selectedId;
+    if (selectedId !== null && this.findObjectIndex(selectedId) < 0) {
+      this.selectedId = null;
+    }
+  }
+
+  /**
+   * Allocates a monotonically increasing instance id, skipping any id already
+   * present (including ids restored by undo or imported from a plan). The
+   * allocator is never rolled back from history snapshots.
+   */
+  private allocateInstanceId(): string {
+    let candidate: string = INSTANCE_ID_PREFIX + this.nextInstanceNumber;
+    while (this.findObjectIndex(candidate) >= 0) {
+      this.nextInstanceNumber++;
+      candidate = INSTANCE_ID_PREFIX + this.nextInstanceNumber;
+    }
+    this.nextInstanceNumber++;
+    return candidate;
+  }
+
+  /**
+   * Advances the allocator past small, safe numeric obj-N ids after a
+   * successful import. Arbitrary imported ids are always accepted; ids whose
+   * numeric suffix is too long to increment without precision loss are simply
+   * not used as allocator seeds. allocateInstanceId still collision-checks the
+   * real object list, so a skipped seed cannot cause a duplicate id.
+   */
+  private ensureAllocatorPastExisting(): void {
+    for (let i = 0; i < this.objects.length; i++) {
+      const id: string = this.objects[i].id;
+      if (id.indexOf(INSTANCE_ID_PREFIX) !== 0) {
+        continue;
+      }
+      const suffix: string = id.substring(INSTANCE_ID_PREFIX.length);
+      if (suffix.length === 0 || suffix.length > MAX_SEEDABLE_ID_SUFFIX_LENGTH) {
+        continue;
+      }
+      let allDigits: boolean = true;
+      for (let j = 0; j < suffix.length; j++) {
+        const code: number = suffix.charCodeAt(j);
+        if (code < 48 || code > 57) {
+          allDigits = false;
+          break;
+        }
+      }
+      if (!allDigits) {
+        continue;
+      }
+      const value: number = Number(suffix);
+      if (Number.isInteger(value) && value >= 0 &&
+        value < MAX_SAFE_INSTANCE_NUMBER && value >= this.nextInstanceNumber) {
+        this.nextInstanceNumber = value + 1;
+      }
+    }
+  }
+
+  /**
+   * Validates a runtime BoothPlan without trusting any field. All object and
+   * template lookups are performed on isolated copies; nothing is assigned to
+   * controller state until the whole payload is known to be valid.
+   */
+  private validatePlan(plan: BoothPlan): OperationResult<ValidatedPlanData> {
+    if (plan === null || plan === undefined) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT', 'Plan is required.');
+    }
+    if (typeof plan.id !== 'string') {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT', 'Plan id must be a string.');
+    }
+    // Frozen BoothPlan ids are any non-empty string: no arbitrary length cap.
+    const planId: string = plan.id;
+    if (planId.length < 1) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Plan id must be a non-empty string.');
+    }
+    if (typeof plan.name !== 'string') {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT', 'Plan name must be a string.');
+    }
+    // Names are canonical: trimmed and stored without leading/trailing spaces.
+    const planName: string = plan.name.trim();
+    if (planName.length < 1 || planName.length > PLAN_NAME_MAX_LENGTH) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Plan name must be 1 to 30 characters after trimming.');
+    }
+    if (typeof plan.templateId !== 'string') {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Plan template id must be a string.');
+    }
+    const template: BoothTemplate | undefined = getTemplateById(plan.templateId);
+    if (template === undefined) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Unknown booth template: ' + plan.templateId);
+    }
+    if (typeof plan.createdAt !== 'number' || !Number.isFinite(plan.createdAt) ||
+      plan.createdAt < 0) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Plan createdAt must be a finite non-negative timestamp.');
+    }
+    if (typeof plan.updatedAt !== 'number' || !Number.isFinite(plan.updatedAt) ||
+      plan.updatedAt < 0) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Plan updatedAt must be a finite non-negative timestamp.');
+    }
+    if (plan.updatedAt < plan.createdAt) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Plan updatedAt cannot be earlier than createdAt.');
+    }
+    if (!Array.isArray(plan.objects)) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Plan objects must be an array.');
+    }
+    if (plan.objects.length > 0 && plan.objects[0] === null) {
+      return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+        'Plan objects cannot contain null entries.');
+    }
+
+    const copies: PlacedObject[] = [];
+    const seenIds: string[] = [];
+    for (let i = 0; i < plan.objects.length; i++) {
+      const raw: PlacedObject = plan.objects[i];
+      if (raw === null || raw === undefined) {
+        return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+          'Plan objects cannot contain null entries.');
+      }
+      // Object ids are any non-empty string; no length cap is imposed here.
+      if (typeof raw.id !== 'string' || raw.id.length === 0) {
+        return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+          'Every placed object needs a non-empty string id.');
+      }
+      if (seenIds.indexOf(raw.id) >= 0) {
+        return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+          'Placed object ids must be unique: ' + raw.id);
+      }
+      if (typeof raw.catalogId !== 'string' ||
+        getCatalogItemById(raw.catalogId) === undefined) {
+        return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+          'Placed object references an unknown catalog id: ' + raw.catalogId);
+      }
+      if (!Number.isFinite(raw.centerX) || !Number.isFinite(raw.centerY)) {
+        return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+          'Placed object centre must be finite.');
+      }
+      if (!isValidRotation(raw.rotation)) {
+        return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+          'Placed object rotation must be 0, 90, 180 or 270 degrees.');
+      }
+      if (!Number.isFinite(raw.zIndex)) {
+        return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+          'Placed object zIndex must be finite.');
+      }
+
+      const catalog: CatalogItem | undefined = getCatalogItemById(raw.catalogId);
+      if (catalog === undefined) {
+        return this.failure<ValidatedPlanData>('INVALID_ARGUMENT',
+          'Placed object references an unknown catalog id: ' + raw.catalogId);
+      }
+      const candidate: PlacedObject = {
+        id: raw.id,
+        catalogId: raw.catalogId,
+        centerX: raw.centerX,
+        centerY: raw.centerY,
+        rotation: raw.rotation,
+        zIndex: raw.zIndex
+      };
+      const footprint: OperationResult<Rect> = getFootprintRect(candidate, catalog);
+      if (footprint.code !== 'OK' || footprint.data === undefined) {
+        return this.failure<ValidatedPlanData>(footprint.code, footprint.message);
+      }
+      if (!isWithinBounds(footprint.data, template.widthCm, template.heightCm)) {
+        return this.failure<ValidatedPlanData>('OUT_OF_BOUNDS',
+          'Placed object ' + raw.id + ' leaves the booth bounds.');
+      }
+      for (let j = 0; j < template.blockedAreas.length; j++) {
+        if (overlapsPositive(footprint.data, template.blockedAreas[j])) {
+          return this.failure<ValidatedPlanData>('OUT_OF_BOUNDS',
+            'Placed object ' + raw.id + ' overlaps a blocked area.');
+        }
+      }
+      seenIds.push(raw.id);
+      copies.push(candidate);
+    }
+
+    const validated: ValidatedPlanData = {
+      id: planId,
+      name: planName,
+      template: template,
+      objects: copies,
+      createdAt: plan.createdAt,
+      updatedAt: plan.updatedAt
+    };
+    const result: OperationResult<ValidatedPlanData> = {
+      code: 'OK',
+      message: 'Plan validated.',
+      data: validated
+    };
+    return result;
+  }
 
   private failure<T>(code: OperationCode, message: string): OperationResult<T> {
     const result: OperationResult<T> = {
