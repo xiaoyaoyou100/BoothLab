@@ -1,0 +1,16 @@
+@(
+    ".hvigor/"
+    ".idea/"
+    "oh_modules/"
+    "local.properties"
+    "**/build/"
+    "**/outputs/"
+    "*.hap"
+    "*.hsp"
+    "*.log"
+) | ForEach-Object {
+    $line = $_
+    if (-not (Get-Content ".gitignore" | Where-Object { $_ -eq $line })) {
+        Add-Content ".gitignore" $line
+    }
+}
