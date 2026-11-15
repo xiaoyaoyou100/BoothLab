@@ -1,864 +1,806 @@
 /**
- * BoothLab M1 editor page (A01).
+ * BoothLab M2-I01 application shell.
  *
- * One Canvas draws the booth, the 10 cm logical grid, walls/open sides from the
- * catalog template, reserved reminder areas, committed objects, selection and
- * the drag preview. Hit testing is geometric; there is no second overlay layer.
+ * This is the only @Entry page. It owns the durable Preferences adapter, the
+ * PlanRepository and exactly one SaveCoordinator:
  *
- * All drawing uses Canvas-local vp. The viewport converts world cm to vp
- * exactly once, and touch coordinates are already Canvas-local vp, so no
- * density multiplication is applied here.
+ *   launch -> PreferencesStore.create(host context) -> repository.recoverStore
+ *          -> PlanLibrary -> create/open -> EditorWorkspace
+ *          -> save -> PlanLibrary -> open/delete -> restart recovery
+ *
+ * A failed bootstrap is shown as an explicit protected error with a retry
+ * button. The shell never fabricates an empty library, never clears storage and
+ * never falls back to the M1 in-memory demo. Only Index touches Preferences;
+ * the editor engine and the library component never do.
  */
 
+import { common } from '@kit.AbilityKit';
+import { BoothPlan, OperationResult, PlanStore } from '../model/BoothModels';
+import { SaveState } from '../model/M2Contracts';
+import { PlanRepository } from '../repository/PlanRepository';
 import {
-  BoothTemplate,
-  PlacedObject,
-  Point,
-  Rect,
-  Rotation,
-  Side,
-  Viewport
-} from '../model/BoothModels';
-import { EditorController } from '../engine/EditorController';
+  RebuildResult,
+  RebuildState
+} from '../repository/RecoveryContracts';
+import { PreferencesStore } from '../storage/PreferencesStore';
+import { PlanLibrary } from '../components/plan/PlanLibrary';
+import { EditorWorkspace } from '../components/editor/EditorWorkspace';
+import { SaveCoordinator } from '../application/SaveCoordinator';
 import {
-  createViewport,
-  DEFAULT_VIEWPORT_PADDING_VP,
-  screenToWorld,
-  worldToScreen
-} from '../engine/GeometryEngine';
+  RebuildCoordinator,
+  RebuildUiSnapshot
+} from '../application/RebuildCoordinator';
 
 const COLOR_PAGE: string = '#F7F8F4';
 const COLOR_PRIMARY: string = '#247C72';
-const COLOR_ACCENT: string = '#FFB56B';
 const COLOR_TEXT: string = '#263B41';
-const COLOR_BORDER: string = '#E5EBE7';
-const COLOR_CANVAS: string = '#FFFEF9';
-const COLOR_BOOTH: string = '#FFFFFF';
 const COLOR_MUTED: string = '#6B7C80';
-const COLOR_GRID_MAJOR: string = '#D3E0DA';
-const COLOR_OBJECT_FILL: string = '#E8F2EF';
-const COLOR_OBJECT_SELECTED_FILL: string = '#FFF0DF';
-
-const GRID_STEP_CM: number = 10;
-const MAJOR_GRID_STEP_CM: number = 100;
-
-function lengthToVp(value: Length): number {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) && value > 0 ? value : 0;
-  }
-  if (typeof value === 'string') {
-    const parsed: number = parseFloat(value);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-  }
-  return 0;
-}
-
-function formatCm(value: number): string {
-  if (!Number.isFinite(value)) {
-    return '—';
-  }
-  if (Number.isInteger(value)) {
-    return value.toString();
-  }
-  return value.toFixed(1);
-}
-
-function findTouch(touches: TouchObject[], id: number): TouchObject | null {
-  for (let i = 0; i < touches.length; i++) {
-    if (touches[i].id === id) {
-      return touches[i];
-    }
-  }
-  return null;
-}
-
-function hasSide(sides: Side[], side: Side): boolean {
-  for (let i = 0; i < sides.length; i++) {
-    if (sides[i] === side) {
-      return true;
-    }
-  }
-  return false;
-}
+const COLOR_BORDER: string = '#E5EBE7';
+const COLOR_DANGER: string = '#B23A2E';
+const COLOR_CARD: string = '#FFFFFF';
 
 @Entry
 @Component
 struct Index {
-  private controller: EditorController = new EditorController('standard');
-  private context: CanvasRenderingContext2D =
-    new CanvasRenderingContext2D(new RenderingContextSettings(true));
-  private viewport: Viewport | null = null;
-  private canvasWidthVp: number = 0;
-  private canvasHeightVp: number = 0;
-  private activeTouchId: number = -1;
-  private touchStartedDrag: boolean = false;
-  private dragMoved: boolean = false;
-  private canvasReady: boolean = false;
+  @State phase: string = 'loading';
+  @State bootstrapError: string = '';
 
-  @State hasSelection: boolean = false;
-  @State selectedId: string = '';
-  @State dragging: boolean = false;
-  @State committedSummary: string = '未选中物件';
-  @State previewSummary: string = '预览：无';
-  @State statusText: string = '点选展示桌后可拖动；拖动结束才提交位置';
+  @State plans: BoothPlan[] = [];
+  @State libraryBusy: boolean = false;
+  @State libraryMessage: string = '';
+
+  @State editorPlan: BoothPlan | null = null;
+  @State editorSaveState: SaveState = 'Dirty';
+  @State editorSaveBusy: boolean = false;
+  @State editorClosing: boolean = false;
+  @State editorMessage: string = '';
+
+  // Recovery-page controls. The coordinator owns the transition rules; Index
+  // mirrors its immutable snapshot into primitives so ArkUI re-renders.
+  @State rebuildPhase: string = 'BLOCKED';
+  @State rebuildGuidance: string = '';
+  @State rebuildReviewMessage: string = '';
+  @State rebuildFailureMessage: string = '';
+  @State rebuildArchiveId: string = '';
+  @State rebuildCanOffer: boolean = false;
+  @State rebuildCanConfirm: boolean = false;
+  @State rebuildCanCancel: boolean = false;
+  @State rebuildCanRetryRead: boolean = true;
+  @State rebuildBusy: boolean = false;
+
+  private repository: PlanRepository | null = null;
+  private coordinator: SaveCoordinator | null = null;
+  private rebuildCoordinator: RebuildCoordinator | null = null;
+  /** Number of UI save requests in flight, so overlapping saves keep busy true. */
+  private saveRequests: number = 0;
 
   aboutToAppear(): void {
-    this.refreshUi();
+    this.bootstrap();
+  }
+
+  onPageHide(): void {
+    // Best-effort formal save only. Completion state is read from the
+    // coordinator after the real promise resolves; nothing is claimed early.
+    const coordinator: SaveCoordinator | null = this.coordinator;
+    if (this.phase !== 'editor' || coordinator === null) {
+      return;
+    }
+    if (coordinator.getState() === 'Saved' && !coordinator.isSaving()) {
+      return;
+    }
+    coordinator.save().then((result: OperationResult<BoothPlan>): void => {
+      if (this.phase === 'editor' && this.coordinator === coordinator) {
+        this.editorSaveState = coordinator.getState();
+      }
+    }).catch((error: Object): void => {
+      // No UI claim: the next explicit save/back reports the real failure.
+    });
+  }
+
+  onBackPress(): boolean {
+    if (this.phase === 'editor') {
+      this.leaveEditor();
+      return true;
+    }
+    return false;
   }
 
   build() {
     Column() {
-      Column({ space: 2 }) {
-        Text('展构 · BoothLab')
-          .fontSize(24)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(COLOR_TEXT)
-        Text('标准展位 6m×4m')
-          .fontSize(13)
-          .fontColor(COLOR_MUTED)
-      }
-      .width('100%')
-      .alignItems(HorizontalAlign.Start)
-      .padding({ left: 18, right: 18, top: 14, bottom: 8 })
-
-      Canvas(this.context)
-        .width('100%')
-        .layoutWeight(1)
-        .backgroundColor(COLOR_CANVAS)
-        .accessibilityText('展位编辑画布：标准展位六米乘四米，包含一张可拖动的展示桌')
-        .onReady(() => {
-          this.handleReady();
+      if (this.phase === 'loading') {
+        this.loadingView()
+      } else if (this.phase === 'error') {
+        this.bootstrapErrorView()
+      } else if (this.phase === 'editor' && this.editorPlan !== null) {
+        EditorWorkspace({
+          plan: this.editorPlan as BoothPlan,
+          saveState: this.editorSaveState,
+          saveBusy: this.editorSaveBusy,
+          closing: this.editorClosing,
+          message: this.editorMessage,
+          onChanged: (plan: BoothPlan): void => {
+            this.handleEditorChanged(plan);
+          },
+          onSave: (): void => {
+            this.handleEditorSave();
+          },
+          onBack: (): void => {
+            this.leaveEditor();
+          }
         })
-        .onAreaChange((_oldValue: Area, newValue: Area) => {
-          this.handleAreaChange(newValue);
+      } else {
+        PlanLibrary({
+          plans: this.plans,
+          busy: this.libraryBusy,
+          message: this.libraryMessage,
+          onCreate: (name: string, templateId: string): void => {
+            this.handleCreate(name, templateId);
+          },
+          onOpen: (planId: string): void => {
+            this.handleOpen(planId);
+          },
+          onDelete: (planId: string, confirmed: boolean): void => {
+            this.handleDelete(planId, confirmed);
+          }
         })
-        .onTouch((event: TouchEvent) => {
-          this.handleTouch(event);
-        })
-
-      Column({ space: 3 }) {
-        Text(this.committedSummary)
-          .fontSize(13)
-          .fontColor(COLOR_TEXT)
-          .width('100%')
-          .height(20)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .accessibilityText('所选物件坐标：' + this.committedSummary)
-        Text(this.previewSummary)
-          .fontSize(12)
-          .fontColor(COLOR_MUTED)
-          .width('100%')
-          .height(18)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .accessibilityText('拖动预览：' + this.previewSummary)
       }
-      .width('100%')
-      .height(54)
-      .alignItems(HorizontalAlign.Start)
-      .padding({ left: 18, right: 18, top: 8, bottom: 4 })
-
-      Row({ space: 10 }) {
-        Button('旋转 90°')
-          .type(ButtonType.Normal)
-          .backgroundColor(COLOR_PRIMARY)
-          .fontColor('#FFFFFF')
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .height(42)
-          .borderRadius(10)
-          .layoutWeight(1)
-          .enabled(this.hasSelection && !this.dragging)
-          .opacity(this.hasSelection && !this.dragging ? 1 : 0.45)
-          .accessibilityText('将选中的物件顺时针旋转九十度')
-          .onClick(() => {
-            this.handleRotateClick();
-          })
-        Button('回到中心')
-          .type(ButtonType.Normal)
-          .backgroundColor(COLOR_ACCENT)
-          .fontColor(COLOR_TEXT)
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .height(42)
-          .borderRadius(10)
-          .layoutWeight(1)
-          .enabled(this.hasSelection && !this.dragging)
-          .opacity(this.hasSelection && !this.dragging ? 1 : 0.45)
-          .accessibilityText('将选中的物件移动到展位中心')
-          .onClick(() => {
-            this.handleCenterClick();
-          })
-      }
-      .width('100%')
-      .padding({ left: 18, right: 18, top: 4, bottom: 10 })
-
-      Text(this.statusText)
-        .fontSize(12)
-        .fontColor(COLOR_TEXT)
-        .width('100%')
-        .height(50)
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .padding({ left: 18, right: 18, bottom: 8 })
-        .accessibilityText('操作状态：' + this.statusText)
     }
     .width('100%')
     .height('100%')
     .backgroundColor(COLOR_PAGE)
   }
 
-  // ------------------------------------------------------------------
-  // State and viewport
-  // ------------------------------------------------------------------
-
-  private handleReady(): void {
-    this.canvasReady = true;
-    this.refreshViewport();
-    this.drawCanvas();
+  @Builder
+  loadingView() {
+    Column({ space: 12 }) {
+      LoadingProgress()
+        .width(40)
+        .height(40)
+        .color(COLOR_PRIMARY)
+      Text('正在恢复方案库…')
+        .fontSize(15)
+        .fontColor(COLOR_TEXT)
+        .accessibilityText('正在恢复方案库')
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
   }
 
-  private handleAreaChange(newValue: Area): void {
-    const width: number = lengthToVp(newValue.width);
-    const height: number = lengthToVp(newValue.height);
-    if (width === this.canvasWidthVp && height === this.canvasHeightVp) {
-      return;
-    }
-    this.canvasWidthVp = width;
-    this.canvasHeightVp = height;
-    if (this.controller.isDragging()) {
-      this.controller.cancelDrag();
-      this.statusText = '画布尺寸变化，已取消拖动，位置未改变';
-    }
-    this.activeTouchId = -1;
-    this.touchStartedDrag = false;
-    this.dragMoved = false;
-    this.refreshViewport();
-    this.refreshUi();
-    this.drawCanvas();
-  }
-
-  private refreshViewport(): void {
-    const template: BoothTemplate = this.controller.getTemplate();
-    const result = createViewport(this.canvasWidthVp, this.canvasHeightVp,
-      template.widthCm, template.heightCm, DEFAULT_VIEWPORT_PADDING_VP);
-    if (result.code === 'OK' && result.data !== undefined) {
-      this.viewport = result.data;
-    } else {
-      this.viewport = null;
-    }
-  }
-
-  private refreshUi(): void {
-    const selected: PlacedObject | null = this.controller.getSelectedObject();
-    if (selected === null) {
-      this.hasSelection = false;
-      this.selectedId = '';
-      this.committedSummary = '未选中物件';
-    } else {
-      this.hasSelection = true;
-      this.selectedId = selected.id;
-      this.committedSummary = '已选：' + this.catalogName(selected.catalogId) +
-        ' · 中心 (' + formatCm(selected.centerX) + ', ' + formatCm(selected.centerY) +
-        ') cm · 旋转 ' + selected.rotation + '°';
-    }
-
-    const preview: PlacedObject | null = this.controller.getPreviewObject();
-    if (preview === null) {
-      this.previewSummary = '预览：无';
-    } else {
-      this.previewSummary = '预览：中心 (' + formatCm(preview.centerX) + ', ' +
-        formatCm(preview.centerY) + ') cm（未提交）';
-    }
-    this.dragging = this.controller.isDragging();
-  }
-
-  private catalogName(catalogId: string): string {
-    const result = this.controller.getCatalogItem(catalogId);
-    if (result.code === 'OK' && result.data !== undefined) {
-      return result.data.name;
-    }
-    return catalogId;
-  }
-
-  // ------------------------------------------------------------------
-  // Toolbar actions
-  // ------------------------------------------------------------------
-
-  private handleRotateClick(): void {
-    if (this.selectedId === '' || this.dragging) {
-      this.statusText = '请选择一个未在拖动中的物件';
-      return;
-    }
-    const result = this.controller.rotateObject(this.selectedId);
-    if (result.code === 'OK') {
-      this.statusText = '已顺时针旋转 90°';
-    } else if (result.code === 'OUT_OF_BOUNDS') {
-      this.statusText = '旋转被拒绝：旋转后会超出展位边界，已保持原方向';
-    } else if (result.code === 'NOT_FOUND') {
-      this.statusText = '旋转失败：所选物件不存在';
-    } else {
-      this.statusText = '旋转失败：输入无效';
-    }
-    this.refreshUi();
-    this.drawCanvas();
-  }
-
-  private handleCenterClick(): void {
-    if (this.selectedId === '' || this.dragging) {
-      this.statusText = '请选择一个未在拖动中的物件';
-      return;
-    }
-    const template: BoothTemplate = this.controller.getTemplate();
-    const center: Point = { x: template.widthCm / 2, y: template.heightCm / 2 };
-    const result = this.controller.moveObject(this.selectedId, center);
-    if (result.code === 'OK') {
-      this.statusText = '已回到展位中心';
-    } else if (result.code === 'OUT_OF_BOUNDS') {
-      this.statusText = '回到中心被拒绝：物件占位会超出展位';
-    } else if (result.code === 'NOT_FOUND') {
-      this.statusText = '回到中心失败：所选物件不存在';
-    } else {
-      this.statusText = '回到中心失败：输入无效';
-    }
-    this.refreshUi();
-    this.drawCanvas();
-  }
-
-  // ------------------------------------------------------------------
-  // Touch handling: one initiating finger controls the gesture
-  // ------------------------------------------------------------------
-
-  private handleTouch(event: TouchEvent): void {
-    event.stopPropagation();
-    if (this.viewport === null) {
-      this.statusText = '画布不可用：视口尺寸无效';
-      return;
-    }
-    if (event.type === TouchType.Down) {
-      this.handleTouchDown(event);
-    } else if (event.type === TouchType.Move) {
-      this.handleTouchMove(event);
-    } else if (event.type === TouchType.Up) {
-      this.handleTouchUp(event);
-    } else if (event.type === TouchType.Cancel) {
-      this.handleTouchCancel(event);
-    }
-  }
-
-  private handleTouchDown(event: TouchEvent): void {
-    if (this.activeTouchId !== -1) {
-      return;
-    }
-    if (event.changedTouches.length === 0) {
-      return;
-    }
-    const touch: TouchObject = event.changedTouches[0];
-    this.activeTouchId = touch.id;
-    this.touchStartedDrag = false;
-    this.dragMoved = false;
-
-    const world: Point | null = this.toWorld(touch.x, touch.y);
-    if (world === null) {
-      this.activeTouchId = -1;
-      this.statusText = '坐标转换失败，未开始拖动';
-      this.refreshUi();
-      this.drawCanvas();
-      return;
-    }
-
-    const hit = this.controller.hitTest(world);
-    if (hit.code !== 'OK') {
-      this.activeTouchId = -1;
-      this.statusText = '选择失败：' + hit.message;
-      this.refreshUi();
-      this.drawCanvas();
-      return;
-    }
-    if (hit.data === null || hit.data === undefined) {
-      this.controller.selectObject(null);
-      this.statusText = '已取消选择';
-      this.refreshUi();
-      this.drawCanvas();
-      return;
-    }
-    const hitId: string = hit.data;
-
-    const begin = this.controller.beginDrag(hitId, world);
-    if (begin.code === 'OK') {
-      this.touchStartedDrag = true;
-      this.statusText = '拖动中；松开后若完全在展位内才提交';
-    } else {
-      this.controller.selectObject(hitId);
-      this.statusText = '拖动开始失败：' + begin.message;
-    }
-    this.refreshUi();
-    this.drawCanvas();
-  }
-
-  private handleTouchMove(event: TouchEvent): void {
-    if (this.activeTouchId === -1 || !this.touchStartedDrag) {
-      return;
-    }
-    const touch: TouchObject | null = findTouch(event.changedTouches, this.activeTouchId);
-    if (touch === null) {
-      return;
-    }
-    const world: Point | null = this.toWorld(touch.x, touch.y);
-    if (world === null) {
-      this.controller.cancelDrag();
-      this.activeTouchId = -1;
-      this.touchStartedDrag = false;
-      this.dragMoved = false;
-      this.statusText = '坐标转换失败，已取消拖动，位置未改变';
-      this.refreshUi();
-      this.drawCanvas();
-      return;
-    }
-    const update = this.controller.updateDrag(world);
-    if (update.code !== 'OK') {
-      this.statusText = '拖动更新失败：' + update.message;
-    } else {
-      this.dragMoved = true;
-    }
-    this.refreshUi();
-    this.drawCanvas();
-  }
-
-  private handleTouchUp(event: TouchEvent): void {
-    if (this.activeTouchId === -1) {
-      return;
-    }
-    if (!this.touchStartedDrag) {
-      this.activeTouchId = -1;
-      this.dragMoved = false;
-      this.refreshUi();
-      this.drawCanvas();
-      return;
-    }
-
-    let touch: TouchObject | null = findTouch(event.changedTouches, this.activeTouchId);
-    if (touch === null) {
-      if (event.changedTouches.length > 0) {
-        // Another finger lifted; the initiating touch still owns the drag.
-        return;
-      }
-      touch = findTouch(event.touches, this.activeTouchId);
-    }
-    if (touch === null) {
-      this.controller.cancelDrag();
-      this.activeTouchId = -1;
-      this.touchStartedDrag = false;
-      this.dragMoved = false;
-      this.statusText = '未找到结束触点，已取消拖动，位置未改变';
-      this.refreshUi();
-      this.drawCanvas();
-      return;
-    }
-
-    // Push the final UP point through updateDrag before committing, so the
-    // last small move is not lost.
-    const world: Point | null = this.toWorld(touch.x, touch.y);
-    if (world === null) {
-      this.controller.cancelDrag();
-      this.activeTouchId = -1;
-      this.touchStartedDrag = false;
-      this.dragMoved = false;
-      this.statusText = '坐标转换失败，已取消拖动，位置未改变';
-      this.refreshUi();
-      this.drawCanvas();
-      return;
-    }
-    const update = this.controller.updateDrag(world);
-    if (update.code !== 'OK') {
-      this.controller.cancelDrag();
-      this.activeTouchId = -1;
-      this.touchStartedDrag = false;
-      this.dragMoved = false;
-      this.statusText = '最终触点无效，已取消拖动';
-      this.refreshUi();
-      this.drawCanvas();
-      return;
-    }
-
-    const end = this.controller.endDrag();
-    if (end.code === 'OK') {
-      this.statusText = this.dragMoved ? '已提交移动' : '已选择物件';
-    } else if (end.code === 'OUT_OF_BOUNDS') {
-      this.statusText = '超出展位边界，已恢复上次位置';
-    } else {
-      this.statusText = '移动提交失败：' + end.message;
-    }
-    this.activeTouchId = -1;
-    this.touchStartedDrag = false;
-    this.dragMoved = false;
-    this.refreshUi();
-    this.drawCanvas();
-  }
-
-  private handleTouchCancel(event: TouchEvent): void {
-    if (this.activeTouchId === -1) {
-      return;
-    }
-    if (event.changedTouches.length > 0 &&
-      findTouch(event.changedTouches, this.activeTouchId) === null) {
-      // Cancel belongs to another finger; keep the initiating drag alive.
-      return;
-    }
-    if (this.touchStartedDrag) {
-      this.controller.cancelDrag();
-      this.statusText = '拖动已取消，位置未改变';
-    }
-    this.activeTouchId = -1;
-    this.touchStartedDrag = false;
-    this.dragMoved = false;
-    this.refreshUi();
-    this.drawCanvas();
-  }
-
-  private toWorld(screenX: number, screenY: number): Point | null {
-    if (this.viewport === null) {
-      return null;
-    }
-    const point: Point = { x: screenX, y: screenY };
-    const result = screenToWorld(point, this.viewport);
-    if (result.code !== 'OK' || result.data === undefined) {
-      return null;
-    }
-    return result.data;
-  }
-
-  // ------------------------------------------------------------------
-  // Drawing
-  // ------------------------------------------------------------------
-
-  private drawCanvas(): void {
-    if (!this.canvasReady || this.canvasWidthVp <= 0 || this.canvasHeightVp <= 0) {
-      return;
-    }
-    this.context.clearRect(0, 0, this.canvasWidthVp, this.canvasHeightVp);
-    this.context.fillStyle = COLOR_CANVAS;
-    this.context.fillRect(0, 0, this.canvasWidthVp, this.canvasHeightVp);
-    const noDash: number[] = [];
-    this.context.setLineDash(noDash);
-
-    if (this.viewport === null) {
-      this.drawCenteredMessage('画布尺寸不足，无法绘制展位');
-      return;
-    }
-
-    const template: BoothTemplate = this.controller.getTemplate();
-    this.drawBoothBase(template);
-    this.drawGrid(template);
-    this.drawReservedAreas(template);
-    this.drawWalls(template);
-    this.drawObjects();
-    this.drawSelectedOutline();
-    this.drawPreview();
-    this.drawEntryDirection(template);
-  }
-
-  private drawBoothBase(template: BoothTemplate): void {
-    const topLeft: Point | null = this.worldPointToScreen(0, 0);
-    const bottomRight: Point | null = this.worldPointToScreen(template.widthCm, template.heightCm);
-    if (topLeft === null || bottomRight === null) {
-      return;
-    }
-    const width: number = bottomRight.x - topLeft.x;
-    const height: number = bottomRight.y - topLeft.y;
-    this.context.fillStyle = COLOR_BOOTH;
-    this.context.fillRect(topLeft.x, topLeft.y, width, height);
-    this.context.strokeStyle = COLOR_BORDER;
-    this.context.lineWidth = 1;
-    this.context.strokeRect(topLeft.x, topLeft.y, width, height);
-  }
-
-  private drawGrid(template: BoothTemplate): void {
-    const minorDash: number[] = [];
-    this.context.setLineDash(minorDash);
-    this.context.strokeStyle = COLOR_BORDER;
-    this.context.lineWidth = 0.5;
-    this.context.beginPath();
-    for (let x = GRID_STEP_CM; x < template.widthCm; x += GRID_STEP_CM) {
-      const top: Point | null = this.worldPointToScreen(x, 0);
-      const bottom: Point | null = this.worldPointToScreen(x, template.heightCm);
-      if (top !== null && bottom !== null) {
-        this.context.moveTo(top.x, top.y);
-        this.context.lineTo(bottom.x, bottom.y);
-      }
-    }
-    for (let y = GRID_STEP_CM; y < template.heightCm; y += GRID_STEP_CM) {
-      const left: Point | null = this.worldPointToScreen(0, y);
-      const right: Point | null = this.worldPointToScreen(template.widthCm, y);
-      if (left !== null && right !== null) {
-        this.context.moveTo(left.x, left.y);
-        this.context.lineTo(right.x, right.y);
-      }
-    }
-    this.context.stroke();
-
-    this.context.strokeStyle = COLOR_GRID_MAJOR;
-    this.context.lineWidth = 1;
-    this.context.beginPath();
-    for (let x = MAJOR_GRID_STEP_CM; x < template.widthCm; x += MAJOR_GRID_STEP_CM) {
-      const top: Point | null = this.worldPointToScreen(x, 0);
-      const bottom: Point | null = this.worldPointToScreen(x, template.heightCm);
-      if (top !== null && bottom !== null) {
-        this.context.moveTo(top.x, top.y);
-        this.context.lineTo(bottom.x, bottom.y);
-      }
-    }
-    for (let y = MAJOR_GRID_STEP_CM; y < template.heightCm; y += MAJOR_GRID_STEP_CM) {
-      const left: Point | null = this.worldPointToScreen(0, y);
-      const right: Point | null = this.worldPointToScreen(template.widthCm, y);
-      if (left !== null && right !== null) {
-        this.context.moveTo(left.x, left.y);
-        this.context.lineTo(right.x, right.y);
-      }
-    }
-    this.context.stroke();
-  }
-
-  private drawReservedAreas(template: BoothTemplate): void {
-    for (let i = 0; i < template.reservedAreas.length; i++) {
-      const screen: Rect | null = this.worldRectToScreen(template.reservedAreas[i]);
-      if (screen === null) {
-        continue;
-      }
-      this.context.strokeStyle = COLOR_ACCENT;
-      this.context.lineWidth = 1.2;
-      this.context.strokeRect(screen.x, screen.y, screen.width, screen.height);
-      if (screen.width >= 42 && screen.height >= 12) {
-        const label: string = screen.width >= 84 ? '预留区（提示）' : '预留区';
-        const fontSize: number = Math.max(8, Math.min(10, screen.height * 0.4));
-        this.context.font = fontSize.toFixed(0) + 'px sans-serif';
-        this.context.fillStyle = COLOR_ACCENT;
-        this.context.textAlign = 'center';
-        this.context.textBaseline = 'middle';
-        this.context.fillText(label, screen.x + screen.width / 2, screen.y + screen.height / 2);
-      }
-    }
-  }
-
-  private drawWalls(template: BoothTemplate): void {
-    this.context.strokeStyle = COLOR_PRIMARY;
-    this.context.lineWidth = 5;
-    for (let i = 0; i < template.wallSides.length; i++) {
-      this.drawSideLine(template.wallSides[i], template);
-    }
-
-    const dashed: number[] = [6, 5];
-    this.context.setLineDash(dashed);
-    this.context.strokeStyle = COLOR_ACCENT;
-    this.context.lineWidth = 2;
-    for (let i = 0; i < template.openSides.length; i++) {
-      this.drawSideLine(template.openSides[i], template);
-    }
-    const noDash: number[] = [];
-    this.context.setLineDash(noDash);
-  }
-
-  private drawSideLine(side: Side, template: BoothTemplate): void {
-    let start: Point;
-    let end: Point;
-    if (side === 'left') {
-      start = { x: 0, y: 0 };
-      end = { x: 0, y: template.heightCm };
-    } else if (side === 'top') {
-      start = { x: 0, y: 0 };
-      end = { x: template.widthCm, y: 0 };
-    } else if (side === 'right') {
-      start = { x: template.widthCm, y: 0 };
-      end = { x: template.widthCm, y: template.heightCm };
-    } else {
-      start = { x: 0, y: template.heightCm };
-      end = { x: template.widthCm, y: template.heightCm };
-    }
-    const a: Point | null = this.worldPointToScreen(start.x, start.y);
-    const b: Point | null = this.worldPointToScreen(end.x, end.y);
-    if (a === null || b === null) {
-      return;
-    }
-    this.context.beginPath();
-    this.context.moveTo(a.x, a.y);
-    this.context.lineTo(b.x, b.y);
-    this.context.stroke();
-  }
-
-  private drawObjects(): void {
-    const objects: PlacedObject[] = this.controller.getObjects();
-    const preview: PlacedObject | null = this.controller.getPreviewObject();
-    if (preview !== null) {
-      for (let i = 0; i < objects.length; i++) {
-        if (objects[i].id === preview.id) {
-          objects[i] = preview;
+  @Builder
+  bootstrapErrorView() {
+    Scroll() {
+      Column({ space: 12 }) {
+        Text('方案库无法打开')
+          .fontSize(21)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(COLOR_DANGER)
+          .accessibilityText('方案库无法打开')
+        Text(this.bootstrapError)
+          .id('bootstrap-error')
+          .fontSize(14)
+          .fontColor(COLOR_TEXT)
+          .textAlign(TextAlign.Center)
+          .accessibilityText('错误详情：' + this.bootstrapError)
+        Text('原始方案数据无法直接恢复使用。应用不会自动清空方案库，也不会导入演示方案。')
+          .fontSize(13)
+          .fontColor(COLOR_MUTED)
+          .textAlign(TextAlign.Center)
+        if (this.rebuildReviewMessage.length > 0) {
+          Text('恢复审查：' + this.rebuildReviewMessage)
+            .id('rebuild-review-message')
+            .fontSize(13)
+            .fontColor(COLOR_TEXT)
+            .textAlign(TextAlign.Center)
+            .accessibilityText('恢复审查结果：' + this.rebuildReviewMessage)
+        }
+        if (this.rebuildGuidance.length > 0) {
+          Text(this.rebuildGuidance)
+            .id('rebuild-blocked-reason')
+            .fontSize(13)
+            .fontColor(COLOR_MUTED)
+            .textAlign(TextAlign.Center)
+            .accessibilityText('重建可用性说明：' + this.rebuildGuidance)
+        }
+        if (this.rebuildFailureMessage.length > 0) {
+          Text('重建失败：' + this.rebuildFailureMessage)
+            .id('rebuild-failure')
+            .fontSize(13)
+            .fontColor(COLOR_DANGER)
+            .textAlign(TextAlign.Center)
+            .accessibilityText('重建失败：' + this.rebuildFailureMessage)
+        }
+        if (this.rebuildArchiveId.length > 0) {
+          Text('损坏快照归档 ID：' + this.rebuildArchiveId)
+            .id('rebuild-archive-id')
+            .fontSize(13)
+            .fontColor(COLOR_TEXT)
+            .textAlign(TextAlign.Center)
+            .accessibilityText('损坏快照归档 ID：' + this.rebuildArchiveId)
+        }
+        if (this.rebuildPhase === 'REBUILDING') {
+          Column({ space: 6 }) {
+            LoadingProgress()
+              .width(28)
+              .height(28)
+              .color(COLOR_PRIMARY)
+            Text('正在重建方案库…')
+              .fontSize(14)
+              .fontColor(COLOR_TEXT)
+            Text('重建期间已禁用重复操作，请等待完成。')
+              .fontSize(12)
+              .fontColor(COLOR_MUTED)
+              .textAlign(TextAlign.Center)
+          }
+          .id('rebuild-progress')
+          .width('100%')
+          .padding(12)
+          .alignItems(HorizontalAlign.Center)
+          .accessibilityText('正在重建方案库，已禁用重复操作')
+        } else if (this.rebuildPhase === 'CONFIRMING') {
+          this.rebuildConfirmView()
+        } else {
+          Row({ space: 10 }) {
+            Button('重试读取')
+              .id('bootstrap-retry')
+              .type(ButtonType.Normal)
+              .height(42)
+              .layoutWeight(1)
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#FFFFFF')
+              .backgroundColor(COLOR_PRIMARY)
+              .borderRadius(10)
+              .enabled(this.rebuildCanRetryRead)
+              .opacity(this.rebuildCanRetryRead ? 1 : 0.45)
+              .accessibilityText('重新读取方案库恢复状态')
+              .onClick(() => {
+                this.retryRecovery();
+              })
+            if (this.rebuildPhase === 'FAILED' && this.rebuildCanOffer) {
+              Button('重新尝试重建')
+                .id('rebuild-retry')
+                .type(ButtonType.Normal)
+                .height(42)
+                .layoutWeight(1)
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor('#FFFFFF')
+                .backgroundColor(COLOR_DANGER)
+                .borderRadius(10)
+                .accessibilityText('重新尝试重建方案库，需再次确认')
+                .onClick(() => {
+                  this.handleRebuildRequest();
+                })
+            } else if (this.rebuildCanOffer) {
+              Button('重建方案库')
+                .id('rebuild-entry')
+                .type(ButtonType.Normal)
+                .height(42)
+                .layoutWeight(1)
+                .fontSize(15)
+                .fontWeight(FontWeight.Medium)
+                .fontColor('#FFFFFF')
+                .backgroundColor(COLOR_DANGER)
+                .borderRadius(10)
+                .accessibilityText('重建方案库，需要独立二次确认')
+                .onClick(() => {
+                  this.handleRebuildRequest();
+                })
+            }
+          }
+          .width('100%')
         }
       }
+      .width('100%')
+      .padding(24)
+      .alignItems(HorizontalAlign.Center)
     }
-    objects.sort((a: PlacedObject, b: PlacedObject) => a.zIndex - b.zIndex);
-    for (let i = 0; i < objects.length; i++) {
-      const object: PlacedObject = objects[i];
-      const footprint = this.controller.getFootprint(object);
-      if (footprint.code !== 'OK' || footprint.data === undefined) {
-        continue;
+    .width('100%')
+    .height('100%')
+    .scrollBar(BarState.Off)
+    .backgroundColor(COLOR_PAGE)
+  }
+
+  @Builder
+  rebuildConfirmView() {
+    Column({ space: 8 }) {
+      Text('再次确认重建')
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(COLOR_DANGER)
+        .accessibilityText('再次确认重建')
+      Text('确认后将先归档两份原始损坏快照，再把方案库重建为空白。原方案内容无法恢复，也不会导入演示方案。')
+        .fontSize(13)
+        .fontColor(COLOR_TEXT)
+        .textAlign(TextAlign.Center)
+      Text('取消不会改变方案数据，也不会改变已有归档。')
+        .fontSize(12)
+        .fontColor(COLOR_MUTED)
+        .textAlign(TextAlign.Center)
+      Row({ space: 10 }) {
+        Button('取消')
+          .id('rebuild-cancel')
+          .type(ButtonType.Normal)
+          .height(42)
+          .layoutWeight(1)
+          .fontSize(15)
+          .fontColor(COLOR_TEXT)
+          .backgroundColor(COLOR_PAGE)
+          .borderRadius(10)
+          .border({ width: 1, color: COLOR_BORDER })
+          .enabled(this.rebuildCanCancel)
+          .accessibilityText('取消重建，不改变方案数据和归档')
+          .onClick(() => {
+            this.handleRebuildCancel();
+          })
+        Button('确认重建')
+          .id('rebuild-confirm')
+          .type(ButtonType.Normal)
+          .height(42)
+          .layoutWeight(1)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#FFFFFF')
+          .backgroundColor(COLOR_DANGER)
+          .borderRadius(10)
+          .enabled(this.rebuildCanConfirm)
+          .accessibilityText('确认重建方案库，先归档再写入空库')
+          .onClick(() => {
+            this.handleRebuildConfirm();
+          })
       }
-      const screen: Rect | null = this.worldRectToScreen(footprint.data);
-      if (screen === null) {
-        continue;
+      .width('100%')
+    }
+    .id('rebuild-confirm-panel')
+    .width('100%')
+    .padding(12)
+    .backgroundColor(COLOR_CARD)
+    .borderRadius(10)
+    .border({ width: 1, color: COLOR_BORDER })
+    .accessibilityText('重建二次确认面板')
+  }
+
+  // ------------------------------------------------------------------
+  // Bootstrap
+  // ------------------------------------------------------------------
+
+  private async bootstrap(): Promise<void> {
+    this.phase = 'loading';
+    this.bootstrapError = '';
+    this.libraryBusy = false;
+    this.rebuildCoordinator = null;
+    this.resetRebuildUi();
+    try {
+      const host: common.Context | null = this.resolveHostContext();
+      if (host === null) {
+        this.failBootstrap('无法获取应用上下文，方案库未加载。');
+        return;
       }
-      const selected: boolean = this.selectedId === object.id;
-      this.context.fillStyle = selected ? COLOR_OBJECT_SELECTED_FILL : COLOR_OBJECT_FILL;
-      this.context.fillRect(screen.x, screen.y, screen.width, screen.height);
-      this.context.strokeStyle = selected ? COLOR_ACCENT : COLOR_PRIMARY;
-      this.context.lineWidth = selected ? 2 : 1.5;
-      this.context.strokeRect(screen.x, screen.y, screen.width, screen.height);
-      this.drawObjectLabel(object, screen);
-      this.drawOrientationMarker(object.rotation, screen, selected ? COLOR_ACCENT : COLOR_PRIMARY);
+      const storageResult: OperationResult<PreferencesStore> =
+        await PreferencesStore.create(host);
+      if (storageResult.code !== 'OK' || storageResult.data === undefined) {
+        this.failBootstrap('持久化存储初始化失败：' + storageResult.message);
+        return;
+      }
+      // The same PreferencesStore is both the snapshot storage and the recovery
+      // archive port. Without this second argument B never offers rebuild.
+      const storage: PreferencesStore = storageResult.data;
+      const repository: PlanRepository = new PlanRepository(storage, storage);
+      this.repository = repository;
+      this.rebuildCoordinator = new RebuildCoordinator(
+        (): RebuildState => repository.getRebuildState(),
+        (confirmed: boolean): Promise<RebuildResult> => repository.rebuildStore(confirmed)
+      );
+      await this.recoverIntoLibrary();
+    } catch (error) {
+      this.failBootstrap('方案库初始化发生未预期错误。');
     }
   }
 
-  private drawObjectLabel(object: PlacedObject, screen: Rect): void {
-    if (screen.width < 30 || screen.height < 14) {
+  /** Runs the real B recovery and then either opens the library or the
+   * protected failure page. Never fabricates an empty library here. */
+  private async recoverIntoLibrary(): Promise<void> {
+    const repository: PlanRepository | null = this.repository;
+    const rebuild: RebuildCoordinator | null = this.rebuildCoordinator;
+    if (repository === null || rebuild === null) {
+      this.failBootstrap('方案库恢复状态不可用。');
       return;
     }
-    const fontSize: number = Math.max(9, Math.min(13, screen.height * 0.3));
-    this.context.font = fontSize.toFixed(0) + 'px sans-serif';
-    this.context.fillStyle = COLOR_TEXT;
-    this.context.textAlign = 'center';
-    this.context.textBaseline = 'middle';
-    this.context.fillText(this.catalogName(object.catalogId),
-      screen.x + screen.width / 2, screen.y + screen.height / 2);
+    this.phase = 'loading';
+    this.bootstrapError = '';
+    this.libraryBusy = false;
+    try {
+      const recovered: OperationResult<PlanStore> = await repository.recoverStore();
+      if (recovered.code === 'OK' && recovered.data !== undefined) {
+        this.enterLibrary(repository, recovered.message);
+        return;
+      }
+      this.showRecoveryFailure('方案库恢复失败：' + recovered.message, rebuild);
+    } catch (error) {
+      this.showRecoveryFailure('方案库恢复失败：发生未预期错误。', rebuild);
+    }
+  }
+
+  private enterLibrary(repository: PlanRepository, message: string): void {
+    this.coordinator = new SaveCoordinator(repository);
+    this.plans = repository.listPlans();
+    this.libraryMessage = message;
+    this.libraryBusy = false;
+    this.editorPlan = null;
+    this.editorClosing = false;
+    this.phase = 'library';
+  }
+
+  private showRecoveryFailure(message: string, rebuild: RebuildCoordinator): void {
+    this.bootstrapError = message;
+    this.applyRebuildSnapshot(rebuild.prepare(message));
+    this.phase = 'error';
+    this.libraryBusy = false;
+  }
+
+  private retryRecovery(): void {
+    this.runRetryRecovery();
+  }
+
+  /** Re-reads through the real repository without replacing it, so a rebuild
+   * failure's message and archive id remain visible on the next review. */
+  private async runRetryRecovery(): Promise<void> {
+    if (this.rebuildBusy) {
+      return;
+    }
+    if (this.repository === null || this.rebuildCoordinator === null) {
+      this.bootstrap();
+      return;
+    }
+    await this.recoverIntoLibrary();
+  }
+
+  private applyRebuildSnapshot(snapshot: RebuildUiSnapshot): void {
+    this.rebuildPhase = snapshot.phase;
+    this.rebuildGuidance = snapshot.guidance;
+    this.rebuildReviewMessage = snapshot.reviewMessage;
+    this.rebuildFailureMessage = snapshot.failureMessage;
+    this.rebuildArchiveId = snapshot.archiveId;
+    this.rebuildCanOffer = snapshot.canOfferRebuild;
+    this.rebuildCanConfirm = snapshot.canConfirm;
+    this.rebuildCanCancel = snapshot.canCancel;
+    this.rebuildCanRetryRead = snapshot.canRetryRead;
+    this.rebuildBusy = snapshot.busy;
+  }
+
+  private resetRebuildUi(): void {
+    this.rebuildPhase = 'BLOCKED';
+    this.rebuildGuidance = '';
+    this.rebuildReviewMessage = '';
+    this.rebuildFailureMessage = '';
+    this.rebuildArchiveId = '';
+    this.rebuildCanOffer = false;
+    this.rebuildCanConfirm = false;
+    this.rebuildCanCancel = false;
+    this.rebuildCanRetryRead = true;
+    this.rebuildBusy = false;
+  }
+
+  private handleRebuildRequest(): void {
+    const rebuild: RebuildCoordinator | null = this.rebuildCoordinator;
+    if (rebuild === null || this.rebuildBusy) {
+      return;
+    }
+    this.applyRebuildSnapshot(rebuild.requestRebuild());
+  }
+
+  private handleRebuildCancel(): void {
+    const rebuild: RebuildCoordinator | null = this.rebuildCoordinator;
+    if (rebuild === null || this.rebuildBusy) {
+      return;
+    }
+    this.applyRebuildSnapshot(rebuild.cancelRebuild());
+  }
+
+  private handleRebuildConfirm(): void {
+    const rebuild: RebuildCoordinator | null = this.rebuildCoordinator;
+    const repository: PlanRepository | null = this.repository;
+    if (rebuild === null || repository === null || this.rebuildBusy) {
+      return;
+    }
+    const pending: Promise<RebuildUiSnapshot> = rebuild.confirmRebuild();
+    // confirmRebuild enters REBUILDING synchronously; mirror it before the
+    // await so repeat taps are disabled while B is still working.
+    this.applyRebuildSnapshot(rebuild.getSnapshot());
+    pending.then((snapshot: RebuildUiSnapshot): void => {
+      if (this.rebuildCoordinator !== rebuild) {
+        return;
+      }
+      this.applyRebuildSnapshot(snapshot);
+      if (snapshot.phase === 'REBUILT') {
+        this.finishRebuild(repository, snapshot);
+      }
+    }).catch((error: Object): void => {
+      if (this.rebuildCoordinator !== rebuild) {
+        return;
+      }
+      this.applyRebuildSnapshot(rebuild.getSnapshot());
+    });
+  }
+
+  /** Only a REBUILT result reaches here: the repository is already the real
+   * empty schema-1 store, so normal create/save/open flows become available. */
+  private finishRebuild(repository: PlanRepository,
+    snapshot: RebuildUiSnapshot): void {
+    let message: string = snapshot.successMessage.length > 0 ?
+      snapshot.successMessage : '方案库已重建为空库。';
+    if (snapshot.archiveId.length > 0) {
+      message = message + ' 原始损坏快照归档 ID：' + snapshot.archiveId + '。';
+    }
+    this.bootstrapError = '';
+    this.enterLibrary(repository, message);
+  }
+
+  private failBootstrap(message: string): void {
+    // Explicit protected failure. Persisted data is never cleared or reset.
+    this.bootstrapError = message;
+    this.phase = 'error';
+    this.libraryBusy = false;
+  }
+
+  private resolveHostContext(): common.Context | null {
+    try {
+      const uiContext = this.getUIContext();
+      if (uiContext === null || uiContext === undefined) {
+        return null;
+      }
+      const host = uiContext.getHostContext();
+      if (host === null || host === undefined) {
+        return null;
+      }
+      return host;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Library actions (all awaited, all refreshed from the repository)
+  // ------------------------------------------------------------------
+
+  private async handleCreate(name: string, templateId: string): Promise<void> {
+    if (this.repository === null || this.libraryBusy) {
+      return;
+    }
+    this.libraryBusy = true;
+    this.libraryMessage = '正在创建展位方案…';
+    try {
+      const created: OperationResult<BoothPlan> =
+        await this.repository.createPlan(name, templateId);
+      if (created.code !== 'OK' || created.data === undefined) {
+        this.libraryMessage = '创建失败：' + created.message;
+        return;
+      }
+      // A new plan is always opened through the repository so activePlanId is
+      // persisted; the editor receives that durable snapshot, not a seed.
+      const opened: OperationResult<BoothPlan> =
+        await this.repository.openPlan(created.data.id);
+      if (opened.code !== 'OK' || opened.data === undefined) {
+        this.refreshPlans();
+        this.libraryMessage = '方案已创建，但打开失败：' + opened.message;
+        return;
+      }
+      this.refreshPlans();
+      this.enterEditor(opened.data);
+    } catch (error) {
+      this.libraryMessage = '创建失败：发生未预期错误。';
+    } finally {
+      this.libraryBusy = false;
+    }
+  }
+
+  private async handleOpen(planId: string): Promise<void> {
+    if (this.repository === null || this.libraryBusy) {
+      return;
+    }
+    this.libraryBusy = true;
+    this.libraryMessage = '正在打开展位方案…';
+    try {
+      const opened: OperationResult<BoothPlan> = await this.repository.openPlan(planId);
+      if (opened.code !== 'OK' || opened.data === undefined) {
+        this.refreshPlans();
+        this.libraryMessage = '打开失败：' + opened.message;
+        return;
+      }
+      this.refreshPlans();
+      this.enterEditor(opened.data);
+    } catch (error) {
+      this.libraryMessage = '打开失败：发生未预期错误。';
+    } finally {
+      this.libraryBusy = false;
+    }
+  }
+
+  private async handleDelete(planId: string, confirmed: boolean): Promise<void> {
+    if (this.repository === null || this.libraryBusy) {
+      return;
+    }
+    if (!confirmed) {
+      this.libraryMessage = '已取消删除。';
+      return;
+    }
+    this.libraryBusy = true;
+    this.libraryMessage = '正在删除展位方案…';
+    try {
+      const result: OperationResult<boolean> =
+        await this.repository.deletePlan(planId, true);
+      if (result.code === 'OK' && result.data === true) {
+        this.refreshPlans();
+        this.libraryMessage = '展位方案已删除。';
+      } else {
+        // Failed delete keeps the list exactly as the repository reports it.
+        this.libraryMessage = '删除失败：' + result.message;
+      }
+    } catch (error) {
+      this.libraryMessage = '删除失败：发生未预期错误。';
+    } finally {
+      this.libraryBusy = false;
+    }
+  }
+
+  private refreshPlans(): void {
+    if (this.repository !== null) {
+      this.plans = this.repository.listPlans();
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Editor session: one coordinator, opening snapshot never overwritten
+  // ------------------------------------------------------------------
+
+  private enterEditor(plan: BoothPlan): void {
+    if (this.coordinator === null) {
+      return;
+    }
+    this.coordinator.bind(plan);
+    if (this.coordinator.getDraft() === null) {
+      // A repository plan that cannot be bound is reported here instead of
+      // mounting an editor whose save path could never become truthful.
+      this.libraryMessage = '无法打开该展位方案：方案数据无效。';
+      this.refreshPlans();
+      return;
+    }
+    this.editorPlan = plan;
+    this.editorSaveState = this.coordinator.getState();
+    this.editorSaveBusy = false;
+    this.editorClosing = false;
+    this.editorMessage = '';
+    this.saveRequests = 0;
+    this.phase = 'editor';
   }
 
   /**
-   * A corner notch marks the local top-left corner after clockwise rotation:
-   * 0 -> top-left, 90 -> top-right, 180 -> bottom-right, 270 -> bottom-left.
-   * Four 90 degree turns therefore return to exactly the same visual marker.
+   * Records an effective editor change. The opening plan prop is intentionally
+   * not replaced: the editor keeps its own controller/history and only the
+   * coordinator's draft advances.
    */
-  private drawOrientationMarker(rotation: Rotation, screen: Rect, color: string): void {
-    const extent: number = Math.min(screen.width, screen.height);
-    const inset: number = Math.max(3, Math.min(6, extent * 0.18));
-    const radius: number = Math.max(2.5, Math.min(4, extent * 0.12));
-    let markerX: number = screen.x + inset;
-    let markerY: number = screen.y + inset;
-    if (rotation === 90) {
-      markerX = screen.x + screen.width - inset;
-      markerY = screen.y + inset;
-    } else if (rotation === 180) {
-      markerX = screen.x + screen.width - inset;
-      markerY = screen.y + screen.height - inset;
-    } else if (rotation === 270) {
-      markerX = screen.x + inset;
-      markerY = screen.y + screen.height - inset;
+  private handleEditorChanged(plan: BoothPlan): void {
+    const coordinator: SaveCoordinator | null = this.coordinator;
+    if (coordinator === null) {
+      return;
     }
-
-    this.context.beginPath();
-    this.context.arc(markerX, markerY, radius, 0, Math.PI * 2);
-    this.context.fillStyle = color;
-    this.context.fill();
+    const result: OperationResult<boolean> = coordinator.update(plan);
+    if (result.code !== 'OK') {
+      this.editorMessage = '编辑未能记录：' + result.message;
+      return;
+    }
+    this.editorSaveState = coordinator.getState();
   }
 
-  private drawSelectedOutline(): void {
-    const preview: PlacedObject | null = this.controller.getPreviewObject();
-    const selected: PlacedObject | null = preview === null ? this.controller.getSelectedObject() : preview;
-    if (selected === null) {
-      return;
-    }
-    const footprint = this.controller.getFootprint(selected);
-    if (footprint.code !== 'OK' || footprint.data === undefined) {
-      return;
-    }
-    const screen: Rect | null = this.worldRectToScreen(footprint.data);
-    if (screen === null) {
-      return;
-    }
-    this.context.strokeStyle = COLOR_ACCENT;
-    this.context.lineWidth = 3;
-    this.context.strokeRect(screen.x, screen.y, screen.width, screen.height);
+  private handleEditorSave(): void {
+    this.runEditorSave();
   }
 
-  private drawPreview(): void {
-    if (!this.controller.isDragging()) {
+  private async runEditorSave(): Promise<void> {
+    const coordinator: SaveCoordinator | null = this.coordinator;
+    if (coordinator === null) {
       return;
     }
-    const preview: PlacedObject | null = this.controller.getPreviewObject();
-    if (preview === null) {
+    if (this.editorSaveBusy) {
       return;
     }
-    const footprint = this.controller.getFootprint(preview);
-    if (footprint.code !== 'OK' || footprint.data === undefined) {
-      return;
-    }
-    const screen: Rect | null = this.worldRectToScreen(footprint.data);
-    if (screen === null) {
-      return;
-    }
-    const dashed: number[] = [6, 4];
-    this.context.setLineDash(dashed);
-    this.context.strokeStyle = COLOR_ACCENT;
-    this.context.lineWidth = 2.5;
-    this.context.strokeRect(screen.x, screen.y, screen.width, screen.height);
-    const noDash: number[] = [];
-    this.context.setLineDash(noDash);
-  }
-
-  private drawEntryDirection(template: BoothTemplate): void {
-    if (hasSide(template.openSides, 'bottom')) {
-      const anchor: Point | null = this.worldPointToScreen(template.widthCm / 2, template.heightCm);
-      if (anchor !== null) {
-        this.context.font = '12px sans-serif';
-        this.context.fillStyle = COLOR_PRIMARY;
-        this.context.textAlign = 'center';
-        this.context.textBaseline = 'top';
-        this.context.fillText('入口方向 ↓', anchor.x, anchor.y + 8);
+    this.beginSaveUi();
+    this.editorMessage = '';
+    // Explicit UI/coordinator sync before the await.
+    this.editorSaveState = 'Saving';
+    try {
+      const result: OperationResult<BoothPlan> = await coordinator.save();
+      // Explicit sync after the await; never assume Saved.
+      this.editorSaveState = coordinator.getState();
+      if (result.code !== 'OK') {
+        this.editorMessage = '保存失败：' + result.message;
+      } else {
+        this.refreshPlans();
+        if (this.editorSaveState === 'Saved') {
+          this.libraryMessage = '展位方案已保存。';
+        } else if (this.editorSaveState === 'Dirty') {
+          this.editorMessage = '保存期间记录到新的编辑，最新内容尚未保存。';
+        }
       }
+    } catch (error) {
+      this.editorSaveState = coordinator.getState();
+      this.editorMessage = '保存失败：发生未预期错误。';
     }
-    if (hasSide(template.openSides, 'right')) {
-      const anchor: Point | null = this.worldPointToScreen(template.widthCm, template.heightCm / 2);
-      if (anchor !== null) {
-        this.context.font = '11px sans-serif';
-        this.context.fillStyle = COLOR_ACCENT;
-        this.context.textAlign = 'left';
-        this.context.textBaseline = 'middle';
-        this.context.fillText('开放', anchor.x + 8, anchor.y);
+    this.endSaveUi();
+  }
+
+  private leaveEditor(): void {
+    this.runLeaveEditor();
+  }
+
+  /**
+   * Toolbar back and OS back both land here. The latest draft is saved before
+   * leaving; a failed save keeps the editor open with a visible error. If a
+   * newer edit landed during an ordinary save, the loop saves that latest
+   * snapshot instead of silently leaving on the older acknowledgement.
+   */
+  private async runLeaveEditor(): Promise<void> {
+    const coordinator: SaveCoordinator | null = this.coordinator;
+    if (this.phase !== 'editor' || coordinator === null) {
+      return;
+    }
+    if (this.editorClosing) {
+      return;
+    }
+    this.editorClosing = true;
+    this.editorMessage = '';
+    this.beginSaveUi();
+    let canLeave: boolean = false;
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (coordinator.getState() === 'Saved' && !coordinator.isSaving()) {
+          canLeave = true;
+          break;
+        }
+        this.editorSaveState = 'Saving';
+        const result: OperationResult<BoothPlan> = await coordinator.save();
+        this.editorSaveState = coordinator.getState();
+        if (result.code !== 'OK') {
+          this.editorMessage = '返回前保存失败：' + result.message;
+          break;
+        }
+        if (this.editorSaveState === 'Saved') {
+          canLeave = true;
+          break;
+        }
+        // Dirty: an edit arrived during the save. Retry with the latest draft.
       }
+      if (canLeave) {
+        this.refreshPlans();
+        this.libraryMessage = '展位方案已保存。';
+        this.editorSaveState = 'Saved';
+        this.editorPlan = null;
+        this.editorClosing = false;
+        this.phase = 'library';
+      } else {
+        if (this.editorMessage.length === 0) {
+          this.editorMessage = '返回前保存未完成，已留在编辑页。';
+        }
+        this.editorClosing = false;
+      }
+    } catch (error) {
+      this.editorSaveState = coordinator.getState();
+      this.editorMessage = '返回前保存失败：发生未预期错误。';
+      this.editorClosing = false;
     }
+    this.endSaveUi();
   }
 
-  private drawCenteredMessage(message: string): void {
-    this.context.font = '13px sans-serif';
-    this.context.fillStyle = COLOR_TEXT;
-    this.context.textAlign = 'center';
-    this.context.textBaseline = 'middle';
-    this.context.fillText(message, this.canvasWidthVp / 2, this.canvasHeightVp / 2);
+  private beginSaveUi(): void {
+    this.saveRequests = this.saveRequests + 1;
+    this.editorSaveBusy = true;
   }
 
-  private worldPointToScreen(x: number, y: number): Point | null {
-    if (this.viewport === null) {
-      return null;
+  private endSaveUi(): void {
+    if (this.saveRequests > 0) {
+      this.saveRequests = this.saveRequests - 1;
     }
-    const world: Point = { x: x, y: y };
-    const result = worldToScreen(world, this.viewport);
-    if (result.code !== 'OK' || result.data === undefined) {
-      return null;
-    }
-    return result.data;
-  }
-
-  private worldRectToScreen(rect: Rect): Rect | null {
-    const topLeft: Point | null = this.worldPointToScreen(rect.x, rect.y);
-    const bottomRight: Point | null =
-      this.worldPointToScreen(rect.x + rect.width, rect.y + rect.height);
-    if (topLeft === null || bottomRight === null) {
-      return null;
-    }
-    const screen: Rect = {
-      x: topLeft.x,
-      y: topLeft.y,
-      width: bottomRight.x - topLeft.x,
-      height: bottomRight.y - topLeft.y
-    };
-    return screen;
+    this.editorSaveBusy = this.saveRequests > 0;
   }
 }
