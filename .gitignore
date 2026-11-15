@@ -1,16 +1,21 @@
-@(
-    ".hvigor/"
-    ".idea/"
-    "oh_modules/"
-    "local.properties"
-    "**/build/"
-    "**/outputs/"
-    "*.hap"
-    "*.hsp"
-    "*.log"
-) | ForEach-Object {
-    $line = $_
-    if (-not (Get-Content ".gitignore" | Where-Object { $_ -eq $line })) {
-        Add-Content ".gitignore" $line
-    }
-}
+# DevEco Studio caches
+.hvigor/
+.idea/
+
+# Dependencies
+oh_modules/
+**/oh_modules/
+
+# Local environment
+local.properties
+
+# Build outputs
+**/build/
+**/outputs/
+*.hap
+*.hsp
+*.log
+
+# OS temporary files
+.DS_Store
+Thumbs.db
