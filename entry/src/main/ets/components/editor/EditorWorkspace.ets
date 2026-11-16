@@ -22,6 +22,7 @@ import {
   BoothTemplate,
   CatalogItem,
   LayoutIssue,
+  OperationCode,
   PlacedObject,
   Point,
   Rect,
@@ -39,6 +40,8 @@ import {
   screenToWorld,
   worldToScreen
 } from '../../engine/GeometryEngine';
+import { drawObjectVisual } from '../catalog/ObjectVisuals';
+import { ObjectCatalogPicker } from '../catalog/ObjectCatalogPicker';
 
 const COLOR_PAGE: string = '#F7F8F4';
 const COLOR_PRIMARY: string = '#247C72';
@@ -49,8 +52,6 @@ const COLOR_CANVAS: string = '#FFFEF9';
 const COLOR_BOOTH: string = '#FFFFFF';
 const COLOR_MUTED: string = '#6B7C80';
 const COLOR_GRID_MAJOR: string = '#D3E0DA';
-const COLOR_OBJECT_FILL: string = '#E8F2EF';
-const COLOR_OBJECT_SELECTED_FILL: string = '#FFF0DF';
 const COLOR_DANGER: string = '#B91C1C';
 const COLOR_WARNING: string = '#B45309';
 
@@ -275,6 +276,183 @@ export function findIssueSeverityForObject(issues: LayoutIssue[], objectId: stri
   return hasWarning ? 'warning' : '';
 }
 
+/**
+ * Screen-space draw request for one committed/preview object. widthVp and
+ * heightVp are always the UNROTATED catalog extents scaled once by the
+ * existing viewport; rotation is passed through unchanged exactly once.
+ */
+export interface ObjectVisualDraw {
+  imageKey: string;
+  centerX: number;
+  centerY: number;
+  widthVp: number;
+  heightVp: number;
+  rotation: Rotation;
+}
+
+/**
+ * Resolves one object's Canvas-local draw request. The world centre goes
+ * through the existing worldToScreen transform; the drawn extents come from
+ * the real catalog's unrotated widthCm/heightCm multiplied by viewport.scale.
+ * No rotated footprint is used here, so 90/270 cannot be swapped twice.
+ */
+export function resolveObjectVisualDraw(viewport: Viewport | null,
+  object: PlacedObject, catalog: CatalogItem): ObjectVisualDraw | null {
+  if (viewport === null) {
+    return null;
+  }
+  if (!Number.isFinite(catalog.widthCm) || !Number.isFinite(catalog.heightCm) ||
+    catalog.widthCm <= 0 || catalog.heightCm <= 0) {
+    return null;
+  }
+  const world: Point = { x: object.centerX, y: object.centerY };
+  const screen = worldToScreen(world, viewport);
+  if (screen.code !== 'OK' || screen.data === undefined) {
+    return null;
+  }
+  const widthVp: number = viewport.scale * catalog.widthCm;
+  const heightVp: number = viewport.scale * catalog.heightCm;
+  if (!Number.isFinite(widthVp) || !Number.isFinite(heightVp) ||
+    widthVp <= 0 || heightVp <= 0) {
+    return null;
+  }
+  const draw: ObjectVisualDraw = {
+    imageKey: typeof catalog.imageKey === 'string' ? catalog.imageKey : '',
+    centerX: screen.data.x,
+    centerY: screen.data.y,
+    widthVp: widthVp,
+    heightVp: heightVp,
+    rotation: object.rotation
+  };
+  return draw;
+}
+
+/**
+ * Resolves one committed/preview object through the frozen controller catalog
+ * lookup and then the cm -> vp draw helper. An unknown catalog id returns null
+ * so the Canvas skips it instead of inventing a footprint or image key.
+ */
+export function resolveObjectVisualForCatalogId(controller: EditorController,
+  viewport: Viewport | null, object: PlacedObject): ObjectVisualDraw | null {
+  const catalogResult = controller.getCatalogItem(object.catalogId);
+  if (catalogResult.code !== 'OK' || catalogResult.data === undefined) {
+    return null;
+  }
+  return resolveObjectVisualDraw(viewport, object, catalogResult.data);
+}
+
+/**
+ * Finds a legal centre near the booth centre for a catalog item. Overlap is
+ * allowed (the layout panel reports it); only complete containment in the
+ * booth is required. Unknown/invalid dimensions have no legal centre.
+ */
+export function findLegalAddCenter(template: BoothTemplate,
+  item: CatalogItem): Point | null {
+  if (!Number.isFinite(item.widthCm) || !Number.isFinite(item.heightCm) ||
+    item.widthCm <= 0 || item.heightCm <= 0) {
+    return null;
+  }
+  const halfWidth: number = item.widthCm / 2;
+  const halfHeight: number = item.heightCm / 2;
+  const minX: number = halfWidth;
+  const maxX: number = template.widthCm - halfWidth;
+  const minY: number = halfHeight;
+  const maxY: number = template.heightCm - halfHeight;
+  if (minX > maxX || minY > maxY) {
+    return null;
+  }
+  const centerX: number = Math.min(Math.max(template.widthCm / 2, minX), maxX);
+  const centerY: number = Math.min(Math.max(template.heightCm / 2, minY), maxY);
+  const center: Point = { x: centerX, y: centerY };
+  return center;
+}
+
+/** Picker selection is blocked while dragging or while the editor is locked. */
+export function isPickerDisabled(locked: boolean, dragging: boolean): boolean {
+  return locked || dragging;
+}
+
+/** Truthful outcome of one picker selection attempt. */
+export interface CatalogAddAttempt {
+  code: OperationCode;
+  message: string;
+  catalogId: string;
+  catalogItem: CatalogItem | null;
+  center: Point | null;
+  addedObject: PlacedObject | null;
+}
+
+/**
+ * The single picker -> existing-add-path adapter. It validates the catalogId
+ * through the frozen controller/catalog lookup, finds a legal centre and calls
+ * the existing Controller add path exactly once. It never selects the new
+ * object, never changes preview/drag/history state itself, and never reports a
+ * success before Controller confirms one.
+ */
+export function addCatalogObject(controller: EditorController,
+  catalogId: string, disabled: boolean): CatalogAddAttempt {
+  if (disabled) {
+    return {
+      code: 'INVALID_ARGUMENT',
+      message: '添加失败：当前不可添加物件，请先结束拖动或等待操作完成',
+      catalogId: catalogId,
+      catalogItem: null,
+      center: null,
+      addedObject: null
+    };
+  }
+  const catalogResult = controller.getCatalogItem(catalogId);
+  if (catalogResult.code !== 'OK' || catalogResult.data === undefined) {
+    return {
+      code: 'NOT_FOUND',
+      message: '添加失败：物件类型不在目录中',
+      catalogId: catalogId,
+      catalogItem: null,
+      center: null,
+      addedObject: null
+    };
+  }
+  const item: CatalogItem = catalogResult.data;
+  const center: Point | null = findLegalAddCenter(controller.getTemplate(), item);
+  if (center === null) {
+    return {
+      code: 'OUT_OF_BOUNDS',
+      message: '添加失败：展位内没有可容纳该物件的中心位置',
+      catalogId: catalogId,
+      catalogItem: item,
+      center: null,
+      addedObject: null
+    };
+  }
+  const added = controller.addObject(catalogId, center);
+  if (added.code === 'OK' && added.data !== undefined) {
+    return {
+      code: 'OK',
+      message: '添加成功',
+      catalogId: catalogId,
+      catalogItem: item,
+      center: center,
+      addedObject: added.data
+    };
+  }
+  let message: string = '添加失败：' + added.message;
+  if (added.code === 'OUT_OF_BOUNDS') {
+    message = '添加被拒绝：物件占位会超出展位边界';
+  } else if (added.code === 'NOT_FOUND') {
+    message = '添加失败：物件类型不在目录中';
+  } else if (added.code === 'INVALID_ARGUMENT') {
+    message = '添加失败：输入无效，未添加物件';
+  }
+  return {
+    code: added.code,
+    message: message,
+    catalogId: catalogId,
+    catalogItem: item,
+    center: center,
+    addedObject: null
+  };
+}
+
 function findTouch(touches: TouchObject[], id: number): TouchObject | null {
   for (let i = 0; i < touches.length; i++) {
     if (touches[i].id === id) {
@@ -319,7 +497,6 @@ export struct EditorWorkspace {
   private changeNotifier: EditorChangeNotifier = new EditorChangeNotifier();
 
   private catalogItems: CatalogItem[] = listCatalogItems();
-  private catalogOptions: SelectOption[] = [];
 
   @State editorReady: boolean = false;
   @State importError: string = '';
@@ -334,8 +511,8 @@ export struct EditorWorkspace {
   @State dragging: boolean = false;
   @State canUndo: boolean = false;
   @State canRedo: boolean = false;
-  @State catalogIndex: number = 0;
-  @State catalogValue: string = '';
+  @State pickerVisible: boolean = false;
+  @State pickerMessage: string = '';
   @State templateSummary: string = '';
   @State committedSummary: string = '点按画布中的物件进行选择或拖动';
   @State previewSummary: string = '预览：无';
@@ -343,7 +520,6 @@ export struct EditorWorkspace {
   @State statusText: string = '点按物件可选择或拖动；拖动结束才提交位置';
 
   aboutToAppear(): void {
-    this.prepareCatalogOptions();
     // The formal plan replaces the M1 demo seed entirely. A rejected import
     // leaves the editor disabled with an explicit error and never shows demo
     // content as if it were the user's plan.
@@ -502,28 +678,34 @@ export struct EditorWorkspace {
         .padding(24)
         .justifyContent(FlexAlign.Center)
       } else {
-        // Compact catalog row: the Select keeps the M2 catalog/object rendering
-        // path; no Picker or alternative object engine is introduced.
+        // A02 object library entry. The B picker opens in a bounded bottom
+        // sheet so the weighted Canvas, bounded issues list, toolbars and
+        // save/back controls keep their usable sizes near 390vp. Only the
+        // picker's own list scrolls, so there is no nested page/list scroll
+        // conflict, and opening/closing the sheet never resizes or commits the
+        // drag preview.
         Row({ space: 8 }) {
-          Text('物件')
-            .fontSize(12)
-            .fontColor(COLOR_MUTED)
-          Select(this.catalogOptions)
-            .id('object-catalog')
-            .selected(this.catalogIndex)
-            .value(this.catalogValue)
-            .font({ size: 13 })
-            .fontColor(COLOR_TEXT)
-            .height(42)
-            .layoutWeight(1)
-            .enabled(!this.dragging && !this.isLocked())
-            .accessibilityText('选择要添加到展位的物件类型')
-            .onSelect((index: number, value: string) => {
-              this.catalogIndex = index;
-              this.catalogValue = value;
-              this.statusText = '已选择物件类型：' + value;
-            })
-          Button('添加')
+          Column({ space: 2 }) {
+            Text('物件库')
+              .id('object-catalog')
+              .fontSize(13)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(COLOR_TEXT)
+              .width('100%')
+              .maxLines(1)
+              .accessibilityText('物件库')
+            Text(this.catalogSummaryText())
+              .id('catalog-summary')
+              .fontSize(11)
+              .fontColor(COLOR_MUTED)
+              .width('100%')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+
+          Button(this.pickerVisible ? '收起物件库' : '添加物件')
             .id('add-object')
             .type(ButtonType.Normal)
             .backgroundColor(COLOR_PRIMARY)
@@ -532,16 +714,25 @@ export struct EditorWorkspace {
             .fontWeight(FontWeight.Medium)
             .height(42)
             .borderRadius(10)
-            .width(74)
-            .enabled(this.canAddNow())
-            .opacity(this.canAddNow() ? 1 : 0.45)
-            .accessibilityText('将所选类型的物件添加到展位内的可用位置')
+            .width(108)
+            .enabled(this.canOpenPickerNow())
+            .opacity(this.canOpenPickerNow() ? 1 : 0.45)
+            .accessibilityText('打开物件库，点选一个物件添加到展位')
             .onClick(() => {
-              this.handleAddClick();
+              this.handlePickerToggle();
             })
         }
         .width('100%')
         .padding({ left: 12, right: 12, top: 4, bottom: 6 })
+        .bindSheet($$this.pickerVisible, this.pickerSheetBuilder(), {
+          height: 560,
+          showClose: true,
+          dragBar: true,
+          backgroundColor: COLOR_PAGE,
+          onDisappear: () => {
+            this.pickerVisible = false;
+          }
+        })
 
         // The canvas keeps a real weighted area (never an overlay), with a
         // generous minimum so the 600x400 cm booth remains readable near 390vp.
@@ -838,6 +1029,40 @@ export struct EditorWorkspace {
     .backgroundColor(COLOR_PAGE)
   }
 
+  /**
+   * Bounded picker sheet. The picker receives the real catalog snapshot and is
+   * disabled while locked or dragging. A failed add stays in the sheet with its
+   * truthful reason; the card highlight alone is never treated as success.
+   */
+  @Builder
+  pickerSheetBuilder() {
+    Column({ space: 8 }) {
+      if (this.pickerMessage.length > 0) {
+        Text(this.pickerMessage)
+          .id('picker-add-message')
+          .fontSize(12)
+          .fontColor(COLOR_DANGER)
+          .backgroundColor('#FDECEC')
+          .width('100%')
+          .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+          .borderRadius(8)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .accessibilityText('添加结果：' + this.pickerMessage)
+      }
+      ObjectCatalogPicker({
+        items: this.catalogItems,
+        disabled: this.pickerDisabledNow(),
+        onSelect: (catalogId: string) => {
+          this.handleCatalogSelection(catalogId);
+        }
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(COLOR_PAGE)
+  }
+
   // ------------------------------------------------------------------
   // Save/back presentation
   // ------------------------------------------------------------------
@@ -848,10 +1073,6 @@ export struct EditorWorkspace {
 
   private canPressSave(): boolean {
     return canSaveAction(this.isLocked(), this.saveBusy, this.saveState);
-  }
-
-  private canAddNow(): boolean {
-    return canAddAction(this.isLocked(), this.dragging);
   }
 
   private canUndoNow(): boolean {
@@ -917,22 +1138,65 @@ export struct EditorWorkspace {
   }
 
   // ------------------------------------------------------------------
-  // State and viewport
+  // Object library (B picker -> existing legal-centre/add path)
   // ------------------------------------------------------------------
 
-  private prepareCatalogOptions(): void {
-    this.catalogOptions = [];
-    let initialIndex: number = 0;
-    for (let i = 0; i < this.catalogItems.length; i++) {
-      this.catalogOptions.push({ value: this.catalogItems[i].name });
-      if (this.catalogItems[i].id === 'display_table') {
-        initialIndex = i;
-      }
-    }
-    this.catalogIndex = initialIndex;
-    this.catalogValue = this.catalogItems.length > 0 ?
-      this.catalogItems[initialIndex].name : '';
+  private catalogSummaryText(): string {
+    return this.catalogItems.length.toString() + ' 件可选 · 真实目录尺寸';
   }
+
+  private pickerDisabledNow(): boolean {
+    return isPickerDisabled(this.isLocked(), this.dragging);
+  }
+
+  private canOpenPickerNow(): boolean {
+    return !this.pickerDisabledNow();
+  }
+
+  private handlePickerToggle(): void {
+    if (this.pickerVisible) {
+      this.pickerVisible = false;
+      return;
+    }
+    if (!this.canOpenPickerNow()) {
+      this.statusText = this.dragging ? '拖动中不能添加物件' : '当前不可添加物件';
+      return;
+    }
+    this.pickerMessage = '';
+    this.pickerVisible = true;
+  }
+
+  /**
+   * One enabled picker selection performs exactly one add attempt through the
+   * shared adapter. Success closes the sheet and reports the committed result;
+   * failure keeps it open with the truthful reason. The picker's local highlight
+   * is never interpreted as a successful add.
+   */
+  private handleCatalogSelection(catalogId: string): void {
+    if (this.pickerDisabledNow()) {
+      this.pickerMessage = '添加失败：当前不可添加物件，请先结束拖动或等待操作完成';
+      return;
+    }
+    const attempt: CatalogAddAttempt =
+      addCatalogObject(this.controller, catalogId, false);
+    if (attempt.code === 'OK' && attempt.addedObject !== null &&
+      attempt.catalogItem !== null) {
+      this.statusText = '已添加' + attempt.catalogItem.name + '，中心 (' +
+        formatCm(attempt.addedObject.centerX) + ', ' +
+        formatCm(attempt.addedObject.centerY) + ') cm';
+      this.pickerMessage = '';
+      this.pickerVisible = false;
+    } else {
+      this.statusText = attempt.message;
+      this.pickerMessage = attempt.message;
+    }
+    this.refreshUi();
+    this.drawCanvas();
+  }
+
+  // ------------------------------------------------------------------
+  // State and viewport
+  // ------------------------------------------------------------------
 
   private handleReady(): void {
     if (!this.editorReady) {
@@ -1103,65 +1367,6 @@ export struct EditorWorkspace {
   // ------------------------------------------------------------------
   // Toolbar actions
   // ------------------------------------------------------------------
-
-  private handleAddClick(): void {
-    if (this.isLocked()) {
-      return;
-    }
-    if (this.dragging) {
-      this.statusText = '拖动中不能添加物件';
-      return;
-    }
-    if (this.catalogIndex < 0 || this.catalogIndex >= this.catalogItems.length) {
-      this.statusText = '添加失败：未选择有效物件类型';
-      return;
-    }
-    const item: CatalogItem = this.catalogItems[this.catalogIndex];
-    const center: Point | null = this.findAddCenter(item);
-    if (center === null) {
-      this.statusText = '添加失败：展位内没有可容纳该物件的中心位置';
-      return;
-    }
-    const result = this.controller.addObject(item.id, center);
-    if (result.code === 'OK' && result.data !== undefined) {
-      this.statusText = '已添加' + item.name + '，中心 (' +
-        formatCm(result.data.centerX) + ', ' + formatCm(result.data.centerY) + ') cm';
-    } else if (result.code === 'OUT_OF_BOUNDS') {
-      this.statusText = '添加被拒绝：物件占位会超出展位边界';
-    } else if (result.code === 'NOT_FOUND') {
-      this.statusText = '添加失败：物件类型不在目录中';
-    } else {
-      this.statusText = '添加失败：' + result.message;
-    }
-    this.refreshUi();
-    this.drawCanvas();
-  }
-
-  /**
-   * Finds a legal centre near the booth centre. Overlap with existing objects
-   * is intentionally allowed (the layout panel reports warnings); only complete
-   * containment inside the booth is required.
-   */
-  private findAddCenter(item: CatalogItem): Point | null {
-    if (!Number.isFinite(item.widthCm) || !Number.isFinite(item.heightCm) ||
-      item.widthCm <= 0 || item.heightCm <= 0) {
-      return null;
-    }
-    const template: BoothTemplate = this.controller.getTemplate();
-    const halfWidth: number = item.widthCm / 2;
-    const halfHeight: number = item.heightCm / 2;
-    const minX: number = halfWidth;
-    const maxX: number = template.widthCm - halfWidth;
-    const minY: number = halfHeight;
-    const maxY: number = template.heightCm - halfHeight;
-    if (minX > maxX || minY > maxY) {
-      return null;
-    }
-    const centerX: number = Math.min(Math.max(template.widthCm / 2, minX), maxX);
-    const centerY: number = Math.min(Math.max(template.heightCm / 2, minY), maxY);
-    const center: Point = { x: centerX, y: centerY };
-    return center;
-  }
 
   private handleDeleteClick(): void {
     if (this.isLocked()) {
@@ -1652,6 +1857,19 @@ export struct EditorWorkspace {
     objects.sort((a: PlacedObject, b: PlacedObject) => a.zIndex - b.zIndex);
     for (let i = 0; i < objects.length; i++) {
       const object: PlacedObject = objects[i];
+      // Unknown catalog ids have no real dimensions or visual. Reject them
+      // rather than inventing a size; the committed object stays untouched.
+      const visual: ObjectVisualDraw | null =
+        resolveObjectVisualForCatalogId(this.controller, this.viewport, object);
+      if (visual === null) {
+        continue;
+      }
+      // The procedural top view owns the object body. Its extents are the
+      // UNROTATED catalog sizes scaled once, and rotation is applied once
+      // inside drawObjectVisual; the rotated footprint is never re-rotated.
+      drawObjectVisual(this.context, visual.imageKey, visual.centerX,
+        visual.centerY, visual.widthVp, visual.heightVp, visual.rotation);
+
       const footprint = this.controller.getFootprint(object);
       if (footprint.code !== 'OK' || footprint.data === undefined) {
         continue;
@@ -1661,22 +1879,7 @@ export struct EditorWorkspace {
         continue;
       }
       const selected: boolean = this.selectedId === object.id;
-      let fillColor: string = COLOR_OBJECT_FILL;
-      if (selected) {
-        if (this.selectedIssueSeverity === 'error') {
-          fillColor = '#FDECEC';
-        } else if (this.selectedIssueSeverity === 'warning') {
-          fillColor = '#FFF3E4';
-        } else {
-          fillColor = COLOR_OBJECT_SELECTED_FILL;
-        }
-      }
       const strokeColor: string = selected ? this.selectedOutlineColor() : COLOR_PRIMARY;
-      this.context.fillStyle = fillColor;
-      this.context.fillRect(screen.x, screen.y, screen.width, screen.height);
-      this.context.strokeStyle = strokeColor;
-      this.context.lineWidth = selected ? 2 : 1.5;
-      this.context.strokeRect(screen.x, screen.y, screen.width, screen.height);
       this.drawObjectLabel(object, screen);
       this.drawOrientationMarker(object.rotation, screen, strokeColor);
     }
