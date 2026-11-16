@@ -11,6 +11,9 @@ import m2AuditTest from './M2Audit.test';
 import saveCoordinatorListTest from './SaveCoordinatorList.test';
 import editorChangeTest from './EditorChange.test';
 import rebuildCoordinatorListTest from './RebuildCoordinatorList.test';
+import m3ObjectVisualsTest from './M3ObjectVisuals.test';
+import m3PlanUiTest from './M3PlanUi.test';
+import m3EditorUiTest from './M3EditorUi.test';
 
 export default function testsuite() {
   localUnitTest();
@@ -25,4 +28,7 @@ export default function testsuite() {
   saveCoordinatorListTest();
   editorChangeTest();
   rebuildCoordinatorListTest();
+  m3ObjectVisualsTest();
+  m3PlanUiTest();
+  m3EditorUiTest();
 }
