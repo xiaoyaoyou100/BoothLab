@@ -35,11 +35,14 @@ import { listCatalogItems } from '../../catalog/ObjectCatalogData';
 import { EditorController } from '../../engine/EditorController';
 import { EditorChangeNotifier } from '../../application/EditorChangeNotifier';
 import {
-  createViewport,
   DEFAULT_VIEWPORT_PADDING_VP,
   screenToWorld,
   worldToScreen
 } from '../../engine/GeometryEngine';
+import {
+  EditorViewState, createEditorView, zoomEditorView, panEditorView,
+  focusEditorView, fitEditorView, VIEW_ZOOM_STEP, VIEW_ZOOM_MIN, VIEW_ZOOM_MAX
+} from './EditorViewTransform';
 import { drawObjectVisual } from '../catalog/ObjectVisuals';
 import { ObjectCatalogPicker } from '../catalog/ObjectCatalogPicker';
 
@@ -488,6 +491,11 @@ export struct EditorWorkspace {
   private context: CanvasRenderingContext2D =
     new CanvasRenderingContext2D(new RenderingContextSettings(true));
   private viewport: Viewport | null = null;
+  private viewState: EditorViewState | null = null;
+  private panLast: Point | null = null;
+  @State panMode: boolean = false;
+  @State viewZoom: number = 1;
+  @State viewAvailable: boolean = false;
   private canvasWidthVp: number = 0;
   private canvasHeightVp: number = 0;
   private activeTouchId: number = -1;
@@ -518,6 +526,8 @@ export struct EditorWorkspace {
   @State previewSummary: string = '预览：无';
   @State layoutIssues: LayoutIssue[] = [];
   @State statusText: string = '点按物件可选择或拖动；拖动结束才提交位置';
+  @State layoutDetailsExpanded: boolean = false;
+  @State selectionDetailsExpanded: boolean = false;
 
   aboutToAppear(): void {
     // The formal plan replaces the M1 demo seed entirely. A rejected import
@@ -546,12 +556,12 @@ export struct EditorWorkspace {
         Button('返回')
           .id('back-library')
           .type(ButtonType.Normal)
-          .backgroundColor(COLOR_BORDER)
+          .backgroundColor('#DDE5E0')
           .fontColor(COLOR_TEXT)
           .fontSize(13)
           .fontWeight(FontWeight.Medium)
-          .height(40)
-          .borderRadius(10)
+          .height(44)
+          .borderRadius(12)
           .width(60)
           .enabled(canBackAction(this.closing))
           .opacity(canBackAction(this.closing) ? 1 : 0.45)
@@ -563,34 +573,13 @@ export struct EditorWorkspace {
         Column({ space: 2 }) {
           Text(this.planNameTitle.length > 0 ? this.planNameTitle : '展位方案')
             .id('editor-plan-name')
-            .fontSize(17)
+            .fontSize(16)
             .fontWeight(FontWeight.Bold)
             .fontColor(COLOR_TEXT)
             .width('100%')
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .accessibilityText('当前展位方案：' + this.planNameTitle)
-          Row({ space: 6 }) {
-            Text(this.templateSummary)
-              .fontSize(11)
-              .fontColor(COLOR_MUTED)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(1)
-            Text(formatObjectCount(this.objectCount))
-              .id('object-count')
-              .fontSize(11)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(COLOR_PRIMARY)
-              .maxLines(1)
-              .accessibilityText('当前物件数量：' + this.objectCount.toString() + ' 件')
-          }
-          .width('100%')
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-
-        Column({ space: 3 }) {
           Text(this.saveLabelNow())
             .id('save-status')
             .fontSize(10)
@@ -601,27 +590,29 @@ export struct EditorWorkspace {
             .padding({ left: 6, right: 6, top: 2, bottom: 2 })
             .maxLines(1)
             .accessibilityText('保存状态：' + this.saveLabelNow())
-          Button(this.saveButtonLabelNow())
-            .id('save-plan')
-            .type(ButtonType.Normal)
-            .backgroundColor(COLOR_PRIMARY)
-            .fontColor('#FFFFFF')
-            .fontSize(13)
-            .fontWeight(FontWeight.Medium)
-            .height(34)
-            .borderRadius(9)
-            .width(68)
-            .enabled(this.canPressSave())
-            .opacity(this.canPressSave() ? 1 : 0.45)
-            .accessibilityText('保存当前展位方案')
-            .onClick(() => {
-              this.handleSaveClick();
-            })
         }
-        .alignItems(HorizontalAlign.End)
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+
+        Button(this.saveButtonLabelNow())
+          .id('save-plan')
+          .type(ButtonType.Normal)
+          .backgroundColor(COLOR_PRIMARY)
+          .fontColor('#FFFFFF')
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .height(44)
+          .borderRadius(12)
+          .width(64)
+          .enabled(this.canPressSave())
+          .opacity(this.canPressSave() ? 1 : 0.45)
+          .accessibilityText('保存当前展位方案')
+          .onClick(() => {
+            this.handleSaveClick();
+          })
       }
       .width('100%')
-      .padding({ left: 12, right: 12, top: 8, bottom: 6 })
+      .padding({ left: 16, right: 16, top: 8, bottom: 8 })
       .backgroundColor('#FFFFFF')
       .alignItems(VerticalAlign.Center)
 
@@ -644,18 +635,6 @@ export struct EditorWorkspace {
         .accessibilityText('正在保存并返回，请稍候')
       }
 
-      if (this.message.length > 0) {
-        Text(this.message)
-          .id('editor-message')
-          .fontSize(11)
-          .fontColor(COLOR_DANGER)
-          .backgroundColor('#FDECEC')
-          .width('100%')
-          .padding({ left: 18, right: 18, top: 4, bottom: 4 })
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .accessibilityText('编辑状态：' + this.message)
-      }
 
       if (this.importError.length > 0) {
         Column({ space: 8 }) {
@@ -670,7 +649,7 @@ export struct EditorWorkspace {
             .textAlign(TextAlign.Center)
           Text('请返回方案库并重新打开该方案。')
             .fontSize(12)
-            .fontColor(COLOR_MUTED)
+            .fontColor('#617477')
             .textAlign(TextAlign.Center)
         }
         .width('100%')
@@ -686,18 +665,33 @@ export struct EditorWorkspace {
         // drag preview.
         Row({ space: 8 }) {
           Column({ space: 2 }) {
-            Text('物件库')
-              .id('object-catalog')
-              .fontSize(13)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(COLOR_TEXT)
-              .width('100%')
-              .maxLines(1)
-              .accessibilityText('物件库')
+            Row({ space: 6 }) {
+              Text('物件库')
+                .id('object-catalog')
+                .fontSize(13)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(COLOR_TEXT)
+                .maxLines(1)
+                .accessibilityText('物件库')
+              Text(this.templateSummary)
+                .fontSize(11)
+                .fontColor('#617477')
+                .layoutWeight(1)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              Text(formatObjectCount(this.objectCount))
+                .id('object-count')
+                .fontSize(11)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(COLOR_PRIMARY)
+                .maxLines(1)
+                .accessibilityText('当前物件数量：' + this.objectCount.toString() + ' 件')
+            }
+            .width('100%')
             Text(this.catalogSummaryText())
               .id('catalog-summary')
               .fontSize(11)
-              .fontColor(COLOR_MUTED)
+              .fontColor('#617477')
               .width('100%')
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -705,16 +699,30 @@ export struct EditorWorkspace {
           .alignItems(HorizontalAlign.Start)
           .layoutWeight(1)
 
+          Button((this.panMode ? '平移 ' : '视图 ') + Math.round(this.viewZoom * 100).toString() + '%')
+            .id('view-tools')
+            .type(ButtonType.Normal)
+            .width(98)
+            .height(44)
+            .padding(0)
+            .fontSize(12)
+            .borderRadius(12)
+            .backgroundColor(this.panMode ? COLOR_PRIMARY : '#DDE5E0')
+            .fontColor(this.panMode ? '#FFFFFF' : COLOR_TEXT)
+            .enabled(this.canChangeView())
+            .accessibilityText((this.panMode ? '平移模式' : '编辑模式') + '，打开视图工具')
+            .bindMenu(this.viewMenuBuilder())
+
           Button(this.pickerVisible ? '收起物件库' : '添加物件')
             .id('add-object')
             .type(ButtonType.Normal)
             .backgroundColor(COLOR_PRIMARY)
             .fontColor('#FFFFFF')
-            .fontSize(14)
+            .fontSize(13)
             .fontWeight(FontWeight.Medium)
-            .height(42)
-            .borderRadius(10)
-            .width(108)
+            .height(44)
+            .borderRadius(12)
+            .width(104)
             .enabled(this.canOpenPickerNow())
             .opacity(this.canOpenPickerNow() ? 1 : 0.45)
             .accessibilityText('打开物件库，点选一个物件添加到展位')
@@ -723,7 +731,7 @@ export struct EditorWorkspace {
             })
         }
         .width('100%')
-        .padding({ left: 12, right: 12, top: 4, bottom: 6 })
+        .padding({ left: 16, right: 16, top: 4, bottom: 4 })
         .bindSheet($$this.pickerVisible, this.pickerSheetBuilder(), {
           height: 560,
           showClose: true,
@@ -745,7 +753,8 @@ export struct EditorWorkspace {
           .borderRadius(12)
           .enabled(!this.isLocked())
           .accessibilityText('展位编辑画布：' + this.templateSummary +
-            '；点按物件可选择或拖动；入口与预留区提醒为教学提示')
+            (this.panMode ? '；平移模式：单指移动视野' : '；编辑模式：点按物件可选择或拖动') +
+            '；入口与预留区提醒为教学提示')
           .onReady(() => {
             this.handleReady();
           })
@@ -756,273 +765,365 @@ export struct EditorWorkspace {
             this.handleTouch(event);
           })
 
-        // Bounded, scrollable issues. Severity is shown separately so warning
-        // and error text levels stay distinguishable at a glance.
-        Column({ space: 3 }) {
-          Row({ space: 6 }) {
-            Text(formatLayoutIssueSummary(this.layoutIssues.length))
-              .id('layout-issues-title')
-              .fontSize(12)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.layoutIssues.length === 0 ? COLOR_PRIMARY : COLOR_WARNING)
-              .maxLines(1)
-            if (this.layoutIssues.length > 0) {
-              Text('点按条目定位物件')
-                .fontSize(10)
-                .fontColor(COLOR_MUTED)
-                .layoutWeight(1)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-            }
-          }
-          .width('100%')
-          .height(20)
-          .alignItems(VerticalAlign.Center)
-
-          if (this.layoutIssues.length > 0) {
-            List({ space: 3 }) {
-              ForEach(this.layoutIssues, (issue: LayoutIssue, index: number) => {
-                ListItem() {
-                  Row({ space: 6 }) {
-                    Text(formatIssueSeverityLabel(issue.severity))
-                      .fontSize(9)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor(issue.severity === 'error' ? COLOR_DANGER : COLOR_WARNING)
-                      .backgroundColor(issue.severity === 'error' ? '#FADCDC' : '#FFE8C7')
-                      .borderRadius(4)
-                      .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-                      .width(32)
-                      .textAlign(TextAlign.Center)
-                      .maxLines(1)
-                    Column({ space: 1 }) {
-                      Text(formatIssueTypeLabel(issue.code) + ' · ' +
-                        formatIssueIdsLabel(issue.objectIds))
-                        .fontSize(10)
-                        .fontWeight(FontWeight.Medium)
-                        .fontColor(COLOR_TEXT)
-                        .width('100%')
-                        .maxLines(1)
-                        .textOverflow({ overflow: TextOverflow.Ellipsis })
-                      Text(issue.message)
-                        .fontSize(9)
-                        .fontColor(COLOR_MUTED)
-                        .width('100%')
-                        .maxLines(1)
-                        .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    }
-                    .layoutWeight(1)
-                    .alignItems(HorizontalAlign.Start)
-                  }
-                  .id(this.issueElementId(issue, index))
-                  .width('100%')
-                  .height(38)
-                  .padding({ left: 6, right: 6 })
-                  .backgroundColor(issue.severity === 'error' ? '#FDECEC' : '#FFF7ED')
-                  .borderRadius(6)
-                  .onClick(() => {
-                    this.handleIssueClick(issue);
-                  })
-                  .accessibilityText(formatIssueSeverityLabel(issue.severity) + '：' +
-                    formatIssueTypeLabel(issue.code) + '。' + issue.message +
-                    ' 相关物件：' + formatIssueIdsLabel(issue.objectIds))
-                }
-              }, (issue: LayoutIssue, index: number) => this.issueElementId(issue, index))
-            }
-            .width('100%')
-            .height(82)
-            .scrollBar(BarState.Auto)
-            .borderRadius(8)
-
-            Text('教学提示：入口/预留区提醒仅用于布局练习，不构成消防或安全合规结论。')
-              .id('issue-teaching-note')
-              .fontSize(9)
-              .fontColor(COLOR_MUTED)
-              .width('100%')
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .accessibilityText('教学提示：入口和预留区提醒仅用于布局练习，不构成消防或安全合规结论')
-          }
-        }
-        .width('100%')
-        .padding({ left: 12, right: 12, top: 2, bottom: 2 })
-
-        // Readable selected-object properties. Center remains the committed
-        // centre in cm; the drag preview is reported separately and is never
-        // written into the committed summary.
-        Row() {
-          Column({ space: 3 }) {
-            Row({ space: 6 }) {
-              Text(this.hasSelection && this.selectedName.length > 0 ?
-                this.selectedName : '未选中物件')
-                .id('selection-title')
-                .fontSize(12)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(COLOR_TEXT)
-                .layoutWeight(1)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-              if (this.hasSelection && this.selectedIssueSeverity.length > 0) {
-                Text(this.selectedIssueSeverity === 'error' ? '布局错误' : '布局提醒')
-                  .id('selected-issue')
-                  .fontSize(9)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(this.selectedIssueSeverity === 'error' ? COLOR_DANGER : COLOR_WARNING)
-                  .backgroundColor(this.selectedIssueSeverity === 'error' ? '#FADCDC' : '#FFE8C7')
-                  .borderRadius(5)
-                  .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-                  .maxLines(1)
-              }
-              if (this.hasSelection) {
-                Text(formatRotationText(this.selectedRotationDeg))
-                  .id('selected-rotation')
-                  .fontSize(10)
-                  .fontWeight(FontWeight.Medium)
-                  .fontColor(COLOR_PRIMARY)
-                  .backgroundColor('#E8F2EF')
-                  .borderRadius(5)
-                  .padding({ left: 6, right: 6, top: 1, bottom: 1 })
-                  .maxLines(1)
-              }
-            }
-            .width('100%')
-
-            Text(this.committedSummary)
-              .id('selected-summary')
-              .fontSize(12)
-              .fontColor(COLOR_TEXT)
-              .width('100%')
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .accessibilityText('所选物件：' + this.committedSummary)
+        Column() {
+          Column() {
             Row({ space: 8 }) {
-              if (this.hasSelection && this.selectedFootprintText.length > 0) {
-                Text(this.selectedFootprintText)
-                  .id('selected-footprint')
-                  .fontSize(10)
-                  .fontColor(COLOR_MUTED)
+              Column({ space: 2 }) {
+                Text(this.hasSelection && this.selectedName.length > 0 ? this.selectedName : '未选中物件')
+                  .id('selection-title')
+                  .accessibilityText(this.hasSelection ? '所选物件：' + this.selectedName : '未选中物件')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(COLOR_TEXT)
+                  .width('100%')
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Row({ space: 6 }) {
+                  if (this.hasSelection) {
+                    Text(formatRotationText(this.selectedRotationDeg))
+                      .id('selected-rotation')
+                      .fontSize(10)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor(COLOR_PRIMARY)
+                      .backgroundColor('#E8F2EF')
+                      .borderRadius(5)
+                      .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+                      .maxLines(1)
+                    if (this.selectedIssueSeverity.length > 0) {
+                      Text(this.selectedIssueSeverity === 'error' ? '布局错误' : '布局提醒')
+                        .id('selected-issue')
+                        .fontSize(9)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(this.selectedIssueSeverity === 'error' ? COLOR_DANGER : COLOR_WARNING)
+                        .backgroundColor(this.selectedIssueSeverity === 'error' ? '#FADCDC' : '#FFE8C7')
+                        .borderRadius(5)
+                        .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+                        .maxLines(1)
+                    }
+                  } else {
+                    Text('选择物件后可旋转、回中或删除；拖动可调整位置')
+                      .fontSize(10)
+                      .fontColor('#617477')
+                      .width('100%')
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  }
+                }
+                .width('100%')
+                .alignItems(VerticalAlign.Center)
               }
-              Text(this.previewSummary)
-                .id('preview-summary')
-                .fontSize(10)
-                .fontColor(COLOR_MUTED)
-                .layoutWeight(1)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .accessibilityText('拖动预览：' + this.previewSummary)
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+
+              if (this.hasSelection) {
+                Button('旋转')
+                  .id('rotate-object')
+                  .type(ButtonType.Normal)
+                  .backgroundColor(COLOR_PRIMARY)
+                  .fontColor('#FFFFFF')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Medium)
+                  .width(52)
+                  .height(44)
+                  .borderRadius(12)
+                  .padding(0)
+                  .enabled(this.canRotateNow())
+                  .opacity(this.canRotateNow() ? 1 : 0.45)
+                  .accessibilityText('将选中的物件顺时针旋转九十度')
+                  .onClick(() => {
+                    this.handleRotateClick();
+                  })
+                Button('回中')
+                  .id('center-object')
+                  .type(ButtonType.Normal)
+                  .backgroundColor('#DDE5E0')
+                  .fontColor(COLOR_TEXT)
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Medium)
+                  .width(52)
+                  .height(44)
+                  .borderRadius(12)
+                  .padding(0)
+                  .enabled(this.canCenterNow())
+                  .opacity(this.canCenterNow() ? 1 : 0.45)
+                  .accessibilityText('将选中的物件移动到展位中心')
+                  .onClick(() => {
+                    this.handleCenterClick();
+                  })
+                Button('删除')
+                  .id('delete-object')
+                  .type(ButtonType.Normal)
+                  .backgroundColor('#FFFFFF')
+                  .fontColor(COLOR_DANGER)
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Medium)
+                  .width(44)
+                  .height(44)
+                  .borderRadius(12)
+                  .padding(0)
+                  .border({ width: 1, color: COLOR_DANGER })
+                  .enabled(this.canDeleteNow())
+                  .opacity(this.canDeleteNow() ? 1 : 0.45)
+                  .accessibilityText('删除选中的物件')
+                  .onClick(() => {
+                    this.handleDeleteClick();
+                  })
+              }
+
+              Button(this.selectionDetailsExpanded ? '收起' : (this.hasSelection ? '详情' : '说明'))
+                .id('selection-details-toggle')
+                .type(ButtonType.Normal)
+                .width(44)
+                .height(44)
+                .fontSize(11)
+                .padding(0)
+                .fontColor(COLOR_PRIMARY)
+                .backgroundColor('#E8F2EF')
+                .borderRadius(12)
+                .enabled(!this.dragging)
+                .accessibilityText(this.selectionDetailsExpanded ?
+                  (this.hasSelection ? '收起所选物件详情' : '收起选择与拖动说明') :
+                  (this.hasSelection ? '展开所选物件详情' : '查看选择与拖动说明'))
+                .onClick(() => {
+                  if (this.dragging) {
+                    return;
+                  }
+                  this.selectionDetailsExpanded = !this.selectionDetailsExpanded;
+                  this.layoutDetailsExpanded = false;
+                })
             }
             .width('100%')
+            .height(44)
+            .id('editor-context-slot')
+            .padding({ left: 8, right: 8 })
+            .backgroundColor('#FFFFFF')
+            .borderRadius(12)
+            .alignItems(VerticalAlign.Center)
+
+            if (this.selectionDetailsExpanded) {
+              Scroll() {
+                Column({ space: 4 }) {
+                  if (this.hasSelection) {
+                    Text(this.committedSummary)
+                      .id('selected-summary')
+                      .fontSize(11)
+                      .fontColor(COLOR_TEXT)
+                      .width('100%')
+                      .accessibilityText('所选物件：' + this.committedSummary)
+                    if (this.selectedFootprintText.length > 0) {
+                      Text(this.selectedFootprintText)
+                        .id('selected-footprint')
+                        .fontSize(11)
+                        .fontColor('#617477')
+                        .width('100%')
+                    }
+                  } else {
+                    Text('选中物件后可在这里查看摘要与占位信息；拖动过程中会在下方反馈区显示实时位置。')
+                      .fontSize(11)
+                      .fontColor('#617477')
+                      .width('100%')
+                  }
+                }
+                .width('100%')
+                .alignItems(HorizontalAlign.Start)
+              }
+              .width('100%')
+              .height(72)
+              .scrollBar(BarState.Auto)
+            }
           }
-          .layoutWeight(1)
-          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-          .backgroundColor('#FFFFFF')
-          .borderRadius(10)
-        }
-        .width('100%')
-        .padding({ left: 12, right: 12, top: 2, bottom: 2 })
-
-        Row({ space: 8 }) {
-          Button('撤销')
-            .id('undo')
-            .type(ButtonType.Normal)
-            .backgroundColor(COLOR_BORDER)
-            .fontColor(COLOR_TEXT)
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .height(44)
-            .borderRadius(10)
-            .layoutWeight(1)
-            .enabled(this.canUndoNow())
-            .opacity(this.canUndoNow() ? 1 : 0.45)
-            .accessibilityText('撤销上一步有效编辑')
-            .onClick(() => {
-              this.handleUndoClick();
-            })
-          Button('重做')
-            .id('redo')
-            .type(ButtonType.Normal)
-            .backgroundColor(COLOR_BORDER)
-            .fontColor(COLOR_TEXT)
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .height(44)
-            .borderRadius(10)
-            .layoutWeight(1)
-            .enabled(this.canRedoNow())
-            .opacity(this.canRedoNow() ? 1 : 0.45)
-            .accessibilityText('重做已撤销的编辑')
-            .onClick(() => {
-              this.handleRedoClick();
-            })
-          Button('删除')
-            .id('delete-object')
-            .type(ButtonType.Normal)
-            .backgroundColor(COLOR_ACCENT)
-            .fontColor(COLOR_TEXT)
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .height(44)
-            .borderRadius(10)
-            .layoutWeight(1)
-            .enabled(this.canDeleteNow())
-            .opacity(this.canDeleteNow() ? 1 : 0.45)
-            .accessibilityText('删除选中的物件')
-            .onClick(() => {
-              this.handleDeleteClick();
-            })
-        }
-        .width('100%')
-        .padding({ left: 12, right: 12, top: 4, bottom: 2 })
-
-        Row({ space: 8 }) {
-          Button('旋转 90°')
-            .id('rotate-object')
-            .type(ButtonType.Normal)
-            .backgroundColor(COLOR_PRIMARY)
-            .fontColor('#FFFFFF')
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .height(44)
-            .borderRadius(10)
-            .layoutWeight(1)
-            .enabled(this.canRotateNow())
-            .opacity(this.canRotateNow() ? 1 : 0.45)
-            .accessibilityText('将选中的物件顺时针旋转九十度')
-            .onClick(() => {
-              this.handleRotateClick();
-            })
-          Button('回到中心')
-            .id('center-object')
-            .type(ButtonType.Normal)
-            .backgroundColor(COLOR_ACCENT)
-            .fontColor(COLOR_TEXT)
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .height(44)
-            .borderRadius(10)
-            .layoutWeight(1)
-            .enabled(this.canCenterNow())
-            .opacity(this.canCenterNow() ? 1 : 0.45)
-            .accessibilityText('将选中的物件移动到展位中心')
-            .onClick(() => {
-              this.handleCenterClick();
-            })
-        }
-        .width('100%')
-        .padding({ left: 12, right: 12, top: 4, bottom: 2 })
-
-        Text(this.statusText)
-          .id('editor-state')
-          .fontSize(11)
-          .fontColor(COLOR_TEXT)
           .width('100%')
-          .height(38)
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .padding({ left: 12, right: 12, top: 4, bottom: 6 })
-          .accessibilityText('操作状态：' + this.statusText)
+          .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+
+          Row({ space: 8 }) {
+            Button('撤销')
+              .id('undo')
+              .type(ButtonType.Normal)
+              .backgroundColor('#DDE5E0')
+              .fontColor(COLOR_TEXT)
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .width(64)
+              .height(44)
+              .borderRadius(12)
+              .enabled(this.canUndoNow())
+              .opacity(this.canUndoNow() ? 1 : 0.45)
+              .accessibilityText('撤销上一步有效编辑')
+              .onClick(() => {
+                this.handleUndoClick();
+              })
+            Button('重做')
+              .id('redo')
+              .type(ButtonType.Normal)
+              .backgroundColor('#DDE5E0')
+              .fontColor(COLOR_TEXT)
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .width(64)
+              .height(44)
+              .borderRadius(12)
+              .enabled(this.canRedoNow())
+              .opacity(this.canRedoNow() ? 1 : 0.45)
+              .accessibilityText('重做已撤销的编辑')
+              .onClick(() => {
+                this.handleRedoClick();
+              })
+            Button({ type: ButtonType.Normal }) {
+              Column({ space: 2 }) {
+                Text(formatLayoutIssueSummary(this.layoutIssues.length) +
+                  (this.layoutDetailsExpanded ? ' · 收起' : ' · 展开'))
+                  .id('layout-issues-title')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(this.layoutIssues.some((issue: LayoutIssue): boolean => issue.severity === 'error') ?
+                    COLOR_DANGER : (this.layoutIssues.length === 0 ? COLOR_PRIMARY : COLOR_WARNING))
+                  .width('100%')
+                  .maxLines(1)
+                Text('错误' + this.layoutIssues.filter((issue: LayoutIssue): boolean => issue.severity === 'error').length + '/提醒' + this.layoutIssues.filter((issue: LayoutIssue): boolean => issue.severity === 'warning').length)
+                  .fontSize(10)
+                  .fontColor('#617477')
+                  .width('100%')
+                  .maxLines(1)
+              }
+              .width('100%')
+              .alignItems(HorizontalAlign.Start)
+            }
+            .id('layout-details-toggle')
+            .height(44)
+            .layoutWeight(1)
+            .backgroundColor('#FFFFFF')
+            .border({ width: 1, color: '#DDE5E0' })
+            .borderRadius(12)
+            .padding({ left: 12, right: 12 })
+            .enabled(!this.dragging)
+            .accessibilityText(this.layoutDetailsExpanded ?
+              '收起全部布局提醒与教学说明' : '展开全部布局提醒与教学说明')
+            .onClick(() => {
+              if (this.dragging) {
+                return;
+              }
+              this.layoutDetailsExpanded = !this.layoutDetailsExpanded;
+              this.selectionDetailsExpanded = false;
+            })
+          }
+          .width('100%')
+          .height(50)
+          .id('editor-history-toolbar')
+          .padding({ left: 16, right: 16, top: 4, bottom: 2 })
+          .alignItems(VerticalAlign.Center)
+
+          if (this.layoutDetailsExpanded) {
+            Scroll() {
+              Column({ space: 6 }) {
+                Text('教学提示：入口/预留区提醒仅用于布局练习，不构成消防或安全合规结论。')
+                  .id('issue-teaching-note')
+                  .fontSize(11)
+                  .fontColor('#617477')
+                  .width('100%')
+                  .accessibilityText('教学提示：入口和预留区提醒仅用于布局练习，不构成消防或安全合规结论')
+                Text('点按提醒定位物件；滚动查看全部')
+                  .fontSize(11)
+                  .fontColor('#617477')
+                  .width('100%')
+                if (this.layoutIssues.length > 0) {
+                  ForEach(this.layoutIssues, (issue: LayoutIssue, index: number) => {
+                    Row({ space: 6 }) {
+                      Text(formatIssueSeverityLabel(issue.severity))
+                        .fontSize(9)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(issue.severity === 'error' ? COLOR_DANGER : COLOR_WARNING)
+                        .backgroundColor(issue.severity === 'error' ? '#FADCDC' : '#FFE8C7')
+                        .borderRadius(4)
+                        .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                        .width(32)
+                        .textAlign(TextAlign.Center)
+                        .maxLines(1)
+                      Column({ space: 2 }) {
+                        Text(formatIssueTypeLabel(issue.code) + ' · ' +
+                          formatIssueIdsLabel(issue.objectIds))
+                          .fontSize(11)
+                          .fontWeight(FontWeight.Medium)
+                          .fontColor(COLOR_TEXT)
+                          .width('100%')
+                        Text(issue.message)
+                          .fontSize(11)
+                          .fontColor('#617477')
+                          .width('100%')
+                      }
+                      .layoutWeight(1)
+                      .alignItems(HorizontalAlign.Start)
+                    }
+                    .id(this.issueElementId(issue, index))
+                    .width('100%')
+                    .constraintSize({ minHeight: 44 })
+                    .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+                    .backgroundColor(issue.severity === 'error' ? '#FDECEC' : '#FFF7ED')
+                    .borderRadius(6)
+                    .onClick(() => {
+                      this.handleIssueClick(issue);
+                    })
+                    .accessibilityText(formatIssueSeverityLabel(issue.severity) + '：' +
+                      formatIssueTypeLabel(issue.code) + '。' + issue.message +
+                      ' 相关物件：' + formatIssueIdsLabel(issue.objectIds))
+                  }, (issue: LayoutIssue, index: number) => this.issueElementId(issue, index))
+                } else {
+                  Text('没有布局提醒')
+                    .fontSize(11)
+                    .fontColor('#617477')
+                    .width('100%')
+                    .padding({ top: 4, bottom: 4 })
+                }
+              }
+              .width('100%')
+              .alignItems(HorizontalAlign.Start)
+              .padding({ left: 16, right: 16, top: 6, bottom: 4 })
+            }
+            .width('100%')
+            .height(128)
+            .scrollBar(BarState.Auto)
+          }
+
+
+        }
+        .width('100%')
       }
+
+      Scroll() {
+        Column({ space: 2 }) {
+          if (this.dragging) {
+            Text(this.previewSummary)
+              .id('preview-summary')
+              .fontSize(11)
+              .fontColor('#617477')
+              .width('100%')
+              .accessibilityText('拖动预览：' + this.previewSummary)
+          }
+          if (this.message.length > 0) {
+            Text(this.message)
+              .id('editor-message')
+              .accessibilityText('编辑状态：' + this.message)
+              .fontSize(12)
+              .fontColor(COLOR_DANGER)
+              .backgroundColor('#FDECEC')
+              .borderRadius(4)
+              .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+              .width('100%')
+          }
+          Text(this.statusText)
+            .id('editor-state')
+            .fontSize(11)
+            .fontColor(COLOR_TEXT)
+            .width('100%')
+            .accessibilityText('操作状态：' + this.statusText)
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
+        .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+      }
+      .width('100%')
+      .height(52)
+      .id('editor-feedback')
+      .scrollBar(BarState.Auto)
     }
     .width('100%')
     .height('100%')
@@ -1216,6 +1317,7 @@ export struct EditorWorkspace {
     if (width === this.canvasWidthVp && height === this.canvasHeightVp) {
       return;
     }
+    this.panLast = null;
     this.canvasWidthVp = width;
     this.canvasHeightVp = height;
     if (this.controller.isDragging()) {
@@ -1232,12 +1334,107 @@ export struct EditorWorkspace {
 
   private refreshViewport(): void {
     const template: BoothTemplate = this.controller.getTemplate();
-    const result = createViewport(this.canvasWidthVp, this.canvasHeightVp,
-      template.widthCm, template.heightCm, DEFAULT_VIEWPORT_PADDING_VP);
-    if (result.code === 'OK' && result.data !== undefined) {
-      this.viewport = result.data;
+    const next = createEditorView(this.canvasWidthVp, this.canvasHeightVp,
+      template.widthCm, template.heightCm, DEFAULT_VIEWPORT_PADDING_VP,
+      this.viewState === null ? 1 : this.viewState.zoom,
+      this.viewState === null ? null : this.viewState.worldFocus);
+    this.applyView(next);
+  }
+
+  private applyView(next: EditorViewState | null): void {
+    // Keep the last valid world focus through a transient zero-size layout.
+    this.viewport = next === null ? null : next.viewport;
+    this.viewAvailable = next !== null;
+    if (next !== null) {
+      this.viewState = next;
+      this.viewZoom = next.zoom;
+    }
+    this.drawCanvas();
+  }
+
+  private canChangeView(): boolean {
+    return this.viewAvailable && !this.isLocked() && !this.saveBusy &&
+      this.saveState !== 'Saving' && !this.pickerVisible &&
+      !this.dragging && !this.controller.isDragging() && this.activeTouchId === -1;
+  }
+
+  @Builder
+  private viewMenuBuilder() {
+    Menu() {
+      MenuItem({ content: '放大 +25%' })
+        .height(44)
+        .enabled(this.viewZoom < VIEW_ZOOM_MAX)
+        .onClick(() => { this.changeView('in'); })
+      MenuItem({ content: '缩小 −25%' })
+        .height(44)
+        .enabled(this.viewZoom > VIEW_ZOOM_MIN)
+        .onClick(() => { this.changeView('out'); })
+      MenuItem({ content: '适配全图' })
+        .height(44)
+        .onClick(() => { this.changeView('fit'); })
+      MenuItem({ content: '聚焦选中物件（160%）' })
+        .height(44)
+        .enabled(this.hasSelection)
+        .onClick(() => { this.changeView('focus'); })
+      MenuItem({ content: this.panMode ? '退出平移，恢复编辑' : '进入平移模式' })
+        .height(44)
+        .onClick(() => { this.changeView('mode'); })
+    }
+  }
+
+  private changeView(action: string): void {
+    if (!this.canChangeView() || this.viewState === null) {
+      return;
+    }
+    if (action === 'mode') {
+      this.panLast = null;
+      this.panMode = !this.panMode;
+      this.statusText = this.panMode ? '平移模式：单指移动视野，不编辑物件' :
+        '编辑模式：点按选择，拖动物件；空白取消选择';
+      return;
+    }
+    if (action === 'fit') {
+      this.applyView(fitEditorView(this.viewState));
+    } else if (action === 'focus') {
+      const selected = this.controller.getSelectedObject();
+      if (selected === null) { return; }
+      const center: Point = { x: selected.centerX, y: selected.centerY };
+      this.applyView(focusEditorView(this.viewState, center));
     } else {
-      this.viewport = null;
+      const anchor: Point = { x: this.canvasWidthVp / 2, y: this.canvasHeightVp / 2 };
+      this.applyView(zoomEditorView(this.viewState,
+        this.viewState.zoom + (action === 'in' ? VIEW_ZOOM_STEP : -VIEW_ZOOM_STEP), anchor));
+    }
+  }
+
+  /** Presentation-only branch; never reaches hitTest/beginDrag/commit/notify. */
+  private handlePanTouch(event: TouchEvent): void {
+    if (event.type === TouchType.Cancel || this.isLocked() || this.saveBusy ||
+      this.saveState === 'Saving' || this.pickerVisible || this.viewport === null) {
+      this.activeTouchId = -1;
+      this.panLast = null;
+      return;
+    }
+    if (event.type === TouchType.Down) {
+      if (this.activeTouchId !== -1 || event.changedTouches.length === 0) { return; }
+      const touch: TouchObject = event.changedTouches[0];
+      if (!Number.isFinite(touch.x) || !Number.isFinite(touch.y)) { return; }
+      this.activeTouchId = touch.id;
+      this.panLast = { x: touch.x, y: touch.y };
+      return;
+    }
+    if (this.activeTouchId === -1) { return; }
+    const touch: TouchObject | null = findTouch(event.changedTouches, this.activeTouchId);
+    if (touch !== null && this.panLast !== null && this.viewState !== null &&
+      Number.isFinite(touch.x) && Number.isFinite(touch.y)) {
+      this.applyView(panEditorView(this.viewState,
+        touch.x - this.panLast.x, touch.y - this.panLast.y));
+      this.panLast = { x: touch.x, y: touch.y };
+    }
+    if ((event.type === TouchType.Up && touch !== null) ||
+      findTouch(event.touches, this.activeTouchId) === null) {
+      this.activeTouchId = -1;
+      this.panLast = null;
     }
   }
 
@@ -1484,6 +1681,10 @@ export struct EditorWorkspace {
 
   private handleTouch(event: TouchEvent): void {
     event.stopPropagation();
+    if (this.panMode) {
+      this.handlePanTouch(event);
+      return;
+    }
     if (this.isLocked()) {
       return;
     }
