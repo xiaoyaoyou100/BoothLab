@@ -83,7 +83,7 @@ const CATALOG_ITEMS: CatalogItem[] = [
   },
   {
     id: 'rollup',
-    name: '易拉宝',
+    name: '立式海报架',
     category: '导视',
     widthCm: 80,
     heightCm: 30,

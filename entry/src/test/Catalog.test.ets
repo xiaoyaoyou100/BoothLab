@@ -21,7 +21,7 @@ const EXPECTED_CATALOG: ExpectedCatalogItem[] = [
   { id: 'sign', name: '导视牌', category: '导视', widthCm: 60, heightCm: 40 },
   { id: 'plant', name: '绿植', category: '装饰', widthCm: 60, heightCm: 60 },
   { id: 'plinth', name: '展品台', category: '展示', widthCm: 80, heightCm: 80 },
-  { id: 'rollup', name: '易拉宝', category: '导视', widthCm: 80, heightCm: 30 }
+  { id: 'rollup', name: '立式海报架', category: '导视', widthCm: 80, heightCm: 30 }
 ];
 
 function countSide(sides: Side[], side: Side): number {

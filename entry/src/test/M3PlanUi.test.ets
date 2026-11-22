@@ -77,6 +77,9 @@ class RecordingCanvasContext {
   fillRects: RecordedRect[] = [];
   strokeRects: RecordedRect[] = [];
   lineDashCalls: string[] = [];
+  geometry: RecordedPoint[] = [];
+  geometryEnds: number[] = [];
+  fillEnds: number[] = [];
 
   save(): void {
     this.calls.push('save');
@@ -86,6 +89,8 @@ class RecordingCanvasContext {
   restore(): void {
     this.calls.push('restore');
     this.restoreCount++;
+    this.geometryEnds.push(this.geometry.length);
+    this.fillEnds.push(this.fillRects.length);
   }
 
   translate(x: number, y: number): void {
@@ -104,10 +109,12 @@ class RecordingCanvasContext {
 
   moveTo(x: number, y: number): void {
     this.calls.push('moveTo');
+    this.geometry.push(new RecordedPoint(x, y));
   }
 
   lineTo(x: number, y: number): void {
     this.calls.push('lineTo');
+    this.geometry.push(new RecordedPoint(x, y));
   }
 
   stroke(): void {
@@ -121,16 +128,24 @@ class RecordingCanvasContext {
   arc(centerX: number, centerY: number, radius: number,
     startAngle: number, endAngle: number): void {
     this.calls.push('arc');
+    this.recordBounds(centerX - radius, centerY - radius, centerX + radius, centerY + radius);
   }
 
   fillRect(x: number, y: number, width: number, height: number): void {
     this.calls.push('fillRect');
     this.fillRects.push(new RecordedRect(x, y, width, height));
+    this.recordBounds(x, y, x + width, y + height);
   }
 
   strokeRect(x: number, y: number, width: number, height: number): void {
     this.calls.push('strokeRect');
     this.strokeRects.push(new RecordedRect(x, y, width, height));
+    const halfStroke: number = this.lineWidth / 2;
+    this.recordBounds(x - halfStroke, y - halfStroke, x + width + halfStroke, y + height + halfStroke);
+  }
+
+  private recordBounds(left: number, top: number, right: number, bottom: number): void {
+    this.geometry.push(new RecordedPoint(left, top), new RecordedPoint(right, bottom));
   }
 
   setLineDash(segments: number[]): void {
@@ -144,6 +159,14 @@ class RecordingCanvasContext {
 
   fillText(text: string, x: number, y: number): void {
     this.calls.push('fillText');
+  }
+}
+
+function expectInsideFootprint(points: RecordedPoint[], halfWidth: number, halfHeight: number): void {
+  expect(points.length > 0).assertTrue();
+  for (let i = 0; i < points.length; i++) {
+    expect(Math.abs(points[i].x) <= halfWidth + 0.000001 &&
+      Math.abs(points[i].y) <= halfHeight + 0.000001).assertTrue();
   }
 }
 
@@ -536,11 +559,28 @@ export default function m3PlanUiTest() {
       expectClose(context.rotations[1], Math.PI * 0.5);
       expect(context.saveCount).assertEqual(2);
       expect(context.restoreCount).assertEqual(2);
-      // The shelf base fill uses unrotated 100x40 cm at scale 0.5.
-      expectClose(context.fillRects[0].x, -25);
-      expectClose(context.fillRects[0].y, -10);
-      expectClose(context.fillRects[0].width, 50);
-      expectClose(context.fillRects[0].height, 20);
+      const firstRestore: number = context.calls.indexOf('restore');
+      expect(context.calls.slice(0, 3).join(',')).assertEqual('save,translate,rotate');
+      expect(context.calls.slice(firstRestore + 1, firstRestore + 4).join(','))
+        .assertEqual('save,translate,rotate');
+      expect(context.calls[context.calls.length - 1]).assertEqual('restore');
+
+      // Rear rail inside the shelf's projected 50x20 vp footprint.
+      const rail: RecordedRect = context.fillRects[0];
+      expectClose(rail.x, -22.75);
+      expectClose(rail.y, -8.5);
+      expectClose(rail.width, 45.5);
+      expectClose(rail.height, 2.4);
+      expectInsideFootprint(context.geometry.slice(0, context.geometryEnds[0]), 25, 10);
+
+      // Reception's full base uses unrotated 140x60 cm at scale 0.5.
+      expect(context.fillEnds[1] > context.fillEnds[0]).assertTrue();
+      const receptionBase: RecordedRect = context.fillRects[context.fillEnds[0]];
+      expectClose(receptionBase.x, -35);
+      expectClose(receptionBase.y, -15);
+      expectClose(receptionBase.width, 70);
+      expectClose(receptionBase.height, 30);
+      expectInsideFootprint(context.geometry.slice(context.geometryEnds[0], context.geometryEnds[1]), 35, 15);
       expect(fingerprint(plan)).assertEqual(before);
     });
 

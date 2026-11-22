@@ -80,6 +80,14 @@ class RecordingCanvasContext {
     this.rotationCount++;
   }
 
+  closePath(): void {
+    this.calls.push('closePath');
+  }
+
+  quadraticCurveTo(cpX: number, cpY: number, endX: number, endY: number): void {
+    this.calls.push('quadraticCurveTo:' + [cpX, cpY, endX, endY].join(','));
+  }
+
   beginPath(): void {
     this.calls.push('beginPath');
   }
@@ -255,22 +263,41 @@ export default function m3ObjectVisualsTest() {
       const rotations: Rotation[] = [0, 90, 180, 270];
       for (let i = 0; i < rotations.length; i++) {
         const context: RecordingCanvasContext = new RecordingCanvasContext();
-        drawOn(context, 'display_table', 50, 60, 120, 40, rotations[i]);
+        drawOn(context, 'display_table', 50, 60, 120, 60, rotations[i]);
         expect(context.fillRects.length > 0).assertTrue();
         const base: RecordedRect = context.fillRects[0];
         expectClose(base.x, -60);
-        expectClose(base.y, -20);
+        expectClose(base.y, -30);
         expectClose(base.width, 120);
-        expectClose(base.height, 40);
-      }
+        expectClose(base.height, 60);
 
-      const tallContext: RecordingCanvasContext = new RecordingCanvasContext();
-      drawOn(tallContext, 'shelf', 0, 0, 40, 120, 90);
-      const tallBase: RecordedRect = tallContext.fillRects[0];
-      expectClose(tallBase.x, -20);
-      expectClose(tallBase.y, -60);
-      expectClose(tallBase.width, 40);
-      expectClose(tallBase.height, 120);
+        // The 100:40 catalog footprint has an inset rear rail and open front.
+        const shelf: RecordingCanvasContext = new RecordingCanvasContext();
+        drawOn(shelf, 'shelf', 73, 41, 100, 40, rotations[i]);
+        expect(shelf.calls.slice(0, 3).join(',')).assertEqual('save,translate,rotate');
+        expect(shelf.calls[shelf.calls.length - 1]).assertEqual('restore');
+        expect(shelf.saveCount).assertEqual(1);
+        expect(shelf.restoreCount).assertEqual(1);
+        expect(shelf.rotationCount).assertEqual(1);
+        expectClose(shelf.translatedX, 73);
+        expectClose(shelf.translatedY, 41);
+        expectClose(shelf.rotatedRadians, i * Math.PI / 2);
+
+        const rail: RecordedRect = shelf.fillRects[0];
+        expectClose(rail.x, -45.5);
+        expectClose(rail.y, -17);
+        expectClose(rail.width, 91);
+        expectClose(rail.height, 4.8);
+        const localCalls: string[] = shelf.calls.slice(3, -1);
+        expect(localCalls.length).assertEqual(shelf.fillRects.length);
+        for (let j = 0; j < localCalls.length; j++) {
+          expect(localCalls[j]).assertEqual('fillRect');
+          const rect: RecordedRect = shelf.fillRects[j];
+          expect(rect.width > 0 && rect.height > 0 &&
+            rect.x >= -50 && rect.y >= -20 &&
+            rect.x + rect.width <= 50 && rect.y + rect.height <= 20).assertTrue();
+        }
+      }
     });
 
     it('drawsDistinctGeometricDetailsForAllStableKeys', 0, () => {
@@ -285,6 +312,13 @@ export default function m3ObjectVisualsTest() {
           }
         }
         expect(duplicate).assertFalse();
+        const key: string = STABLE_KEYS[i];
+        if (key === 'interactive_screen' || key === 'plant' || key === 'plinth') {
+          expect(signature.indexOf('closePath|fill') >= 0).assertTrue();
+        }
+        if (key === 'plant') {
+          expect(signature.indexOf('quadraticCurveTo:') >= 0).assertTrue();
+        }
         expect(context.fillRects.length > 0).assertTrue();
         signatures.push(signature);
       }
