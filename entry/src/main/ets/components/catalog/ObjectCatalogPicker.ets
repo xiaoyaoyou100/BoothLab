@@ -20,8 +20,8 @@ const COLOR_PAGE: string = '#F7F8F4';
 const COLOR_PRIMARY: string = '#247C72';
 const COLOR_ACCENT: string = '#FFB56B';
 const COLOR_TEXT: string = '#263B41';
-const COLOR_MUTED: string = '#6B7C80';
-const COLOR_BORDER: string = '#E5EBE7';
+const COLOR_MUTED: string = '#617477';
+const COLOR_BORDER: string = '#DDE5E0';
 const COLOR_CARD: string = '#FFFFFF';
 const COLOR_SELECTED_FILL: string = '#E8F2EF';
 const COLOR_DISABLED_FILL: string = '#EEF1EF';
@@ -31,9 +31,8 @@ const UNCATEGORIZED: string = '未分类';
 const NO_ROTATION: Rotation = 0;
 const PREVIEW_WIDTH_VP: number = 72;
 const PREVIEW_HEIGHT_VP: number = 44;
-const CARD_HEIGHT_VP: number = 60;
 const CARD_GAP_VP: number = 8;
-const MAX_LIST_HEIGHT_VP: number = 304;
+const HEADER_RESERVED_RIGHT_VP: number = 56;
 
 function lengthToVp(value: Length): number {
   if (typeof value === 'number') {
@@ -137,14 +136,16 @@ export struct ObjectCatalogPicker {
   @State activeCategory: string = ALL_CATEGORY;
 
   build() {
-    Column({ space: 10 }) {
-      Row({ space: 8 }) {
+    Column({ space: 8 }) {
+      Row() {
         Column({ space: 2 }) {
           Text('添加物件')
-            .fontSize(18)
+            .fontSize(19)
             .fontWeight(FontWeight.Bold)
             .fontColor(COLOR_TEXT)
             .width('100%')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
             .accessibilityText('物件库标题')
           Text(this.summaryText())
             .fontSize(12)
@@ -156,14 +157,20 @@ export struct ObjectCatalogPicker {
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
+      }
+      .width('100%')
+      .height(44)
+      .padding({ right: HEADER_RESERVED_RIGHT_VP })
 
+      Row({ space: 8 }) {
         Text(this.disabled ? '已锁定' : '点选添加')
-          .fontSize(11)
+          .fontSize(12)
           .fontColor(COLOR_TEXT)
-          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+          .padding({ left: 10, right: 10, top: 6, bottom: 6 })
           .backgroundColor(this.disabled ? COLOR_DISABLED_FILL : COLOR_ACCENT)
           .borderRadius(12)
           .accessibilityText(this.disabled ? '物件库已锁定' : '点选卡片添加物件')
+        Blank()
       }
       .width('100%')
 
@@ -181,24 +188,35 @@ export struct ObjectCatalogPicker {
             .accessibilityText('物件库为空提示')
         }
         .width('100%')
-        .padding(20)
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+        .padding(16)
         .backgroundColor(COLOR_CARD)
-        .borderRadius(10)
+        .borderRadius(16)
         .border({ width: 1, color: COLOR_BORDER })
         .id('catalog-empty')
       } else {
+        if (this.categoryOptions().length > 3) {
+          Text('左右滑动查看更多分类')
+            .fontSize(12)
+            .fontColor(COLOR_MUTED)
+            .width('100%')
+            .accessibilityText('分类可左右滑动查看更多')
+        }
+
         Scroll() {
           Row({ space: 8 }) {
             ForEach(this.categoryOptions(), (category: string) => {
               Button(category)
                 .id('catalog-category-' + category)
                 .type(ButtonType.Normal)
-                .height(40)
+                .height(44)
+                .constraintSize({ minWidth: 44 })
                 .padding({ left: 14, right: 14 })
                 .fontSize(13)
                 .fontColor(this.activeFilter() === category ? '#FFFFFF' : COLOR_TEXT)
                 .backgroundColor(this.activeFilter() === category ? COLOR_PRIMARY : COLOR_CARD)
-                .borderRadius(10)
+                .borderRadius(14)
                 .border({ width: 1, color: COLOR_BORDER })
                 .enabled(!this.disabled)
                 .opacity(this.disabled ? 0.55 : 1)
@@ -213,6 +231,7 @@ export struct ObjectCatalogPicker {
           }
         }
         .width('100%')
+        .height(44)
         .scrollable(ScrollDirection.Horizontal)
         .scrollBar(BarState.Off)
         .edgeEffect(EdgeEffect.Spring)
@@ -229,9 +248,11 @@ export struct ObjectCatalogPicker {
               .accessibilityText('请选择其他分类')
           }
           .width('100%')
-          .padding(20)
+          .layoutWeight(1)
+          .justifyContent(FlexAlign.Center)
+          .padding(16)
           .backgroundColor(COLOR_CARD)
-          .borderRadius(10)
+          .borderRadius(16)
           .border({ width: 1, color: COLOR_BORDER })
           .id('catalog-filter-empty')
         } else {
@@ -244,7 +265,8 @@ export struct ObjectCatalogPicker {
             }, (item: CatalogItem): string => item.id)
           }
           .width('100%')
-          .height(this.listHeight())
+          .layoutWeight(1)
+          .borderRadius(16)
           .scrollBar(BarState.Auto)
           .edgeEffect(EdgeEffect.Spring)
           .id('catalog-item-list')
@@ -252,9 +274,10 @@ export struct ObjectCatalogPicker {
       }
     }
     .width('100%')
-    .padding({ left: 12, right: 12, top: 12, bottom: 12 })
+    .layoutWeight(1)
+    .padding(16)
     .backgroundColor(COLOR_PAGE)
-    .borderRadius(12)
+    .borderRadius(16)
     .id('object-catalog-picker')
   }
 
@@ -263,20 +286,20 @@ export struct ObjectCatalogPicker {
     Row({ space: 10 }) {
       ObjectCatalogVisual({ item: item })
 
-      Column({ space: 3 }) {
+      Column({ space: 2 }) {
         Text(this.displayName(item))
-          .fontSize(14)
+          .fontSize(15)
           .fontWeight(FontWeight.Medium)
           .fontColor(COLOR_TEXT)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
         Text(this.displayCategory(item))
-          .fontSize(11)
+          .fontSize(13)
           .fontColor(COLOR_PRIMARY)
           .width('100%')
         Text(this.dimensionText(item))
-          .fontSize(11)
+          .fontSize(12)
           .fontColor(COLOR_MUTED)
           .width('100%')
       }
@@ -295,10 +318,10 @@ export struct ObjectCatalogPicker {
         .accessibilityText(this.disabled ? '当前不可添加' : '添加' + this.displayName(item))
     }
     .width('100%')
-    .height(CARD_HEIGHT_VP)
-    .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+    .constraintSize({ minHeight: 76 })
+    .padding({ left: 12, right: 12, top: 10, bottom: 10 })
     .backgroundColor(this.selectedCatalogId === item.id ? COLOR_SELECTED_FILL : COLOR_CARD)
-    .borderRadius(10)
+    .borderRadius(16)
     .border({
       width: this.selectedCatalogId === item.id ? 2 : 1,
       color: this.selectedCatalogId === item.id ? COLOR_PRIMARY : COLOR_BORDER
@@ -397,15 +420,6 @@ export struct ObjectCatalogPicker {
       }
     }
     return filtered;
-  }
-
-  private listHeight(): number {
-    const count: number = this.visibleItems().length;
-    if (count <= 0) {
-      return CARD_HEIGHT_VP;
-    }
-    const natural: number = count * CARD_HEIGHT_VP + (count - 1) * CARD_GAP_VP;
-    return Math.min(MAX_LIST_HEIGHT_VP, natural);
   }
 
   private summaryText(): string {

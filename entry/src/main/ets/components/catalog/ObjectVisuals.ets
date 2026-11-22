@@ -214,208 +214,573 @@ function drawBase(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
 
 function drawReception(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
-  const counterHeight: number = Math.max(2, height * 0.16);
-  fillRect(context, x + width * 0.1, y + height * 0.7,
-    width * 0.8, counterHeight, style.detailColor);
+  const extent: number = Math.min(width, height);
+  // 线宽受短边约束；细节全部落在外轮廓内侧，极小投影也不溢出。
+  const lineWidth: number = Math.min(extent * 0.2,
+    Math.max(0.5, Math.min(3, extent * 0.035)));
+  const inset: number = lineWidth * 0.5;
+  const edge: number = lineWidth;
+  const left: number = x + edge;
+  const top: number = y + edge;
+  const bottom: number = y + height - edge;
+  const innerWidth: number = width - edge * 2;
+  const innerHeight: number = height - edge * 2;
+
+  // reception 自绘内缩底框；dispatch 提前返回，不再调用 drawBase。
+  // 正交俯视：只表达接待台台面，不画柜门、桌腿、文字或透视。
+  context.fillStyle = style.fillColor;
+  context.fillRect(x, y, width, height);
+  context.strokeStyle = style.strokeColor;
+  context.lineWidth = lineWidth;
+  context.strokeRect(x + inset, y + inset,
+    width - inset * 2, height - inset * 2);
+
+  // +y 为访客服务边界：沿内缩底边的服务台面带。
+  const frontDepth: number = Math.min(innerHeight * 0.20, extent * 0.22);
+  fillRect(context, left, bottom - frontDepth, innerWidth, frontDepth,
+    style.detailColor);
+
+  // 低 LOD：仅内缩轮廓 + +y 服务边，保留前后关系。
+  if (extent < 18) {
+    return;
+  }
+
+  // 中 LOD：U 形台面内轮廓；-y 中央留空，表示工作人员内侧开放方向。
+  const armWidth: number = Math.min(innerWidth * 0.16, extent * 0.18);
+  const uLeft: number = left + armWidth;
+  const uRight: number = left + innerWidth - armWidth;
+  const uFront: number = bottom - frontDepth;
+  context.strokeStyle = style.strokeColor;
+  context.lineWidth = lineWidth;
+  context.beginPath();
+  context.moveTo(uLeft, top);
+  context.lineTo(uLeft, uFront);
+  context.lineTo(uRight, uFront);
+  context.lineTo(uRight, top);
+  context.stroke();
+
+  // 18..40 到此为止；>40 才增加少量台面工作细节。
+  if (extent <= 40) {
+    return;
+  }
+
+  // 高 LOD：两侧台面内缘细线，强调工作台面；仍无柜门/桌腿/文字。
+  const rimInset: number = Math.min(lineWidth, armWidth * 0.35);
   context.strokeStyle = style.detailColor;
   context.lineWidth = lineWidth;
-  for (let i = 0; i < 2; i++) {
-    const deskX: number = x + width * (0.12 + i * 0.4);
-    const deskY: number = y + height * 0.16;
-    const deskWidth: number = width * 0.3;
-    const deskHeight: number = height * 0.26;
-    context.strokeRect(deskX, deskY, deskWidth, deskHeight);
-    drawLine(context,
-      deskX + deskWidth * 0.15, deskY + deskHeight * 0.62,
-      deskX + deskWidth * 0.85, deskY + deskHeight * 0.62);
-  }
+  drawLine(context, uLeft - rimInset, top, uLeft - rimInset, uFront);
+  drawLine(context, uRight + rimInset, top, uRight + rimInset, uFront);
 }
 
 function drawDisplayTable(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
-  context.strokeStyle = style.detailColor;
+  const extent: number = Math.min(width, height);
+  // 与 chair/storage/sign 一致：线宽受短边约束，极小投影也不溢出 footprint。
+  const lineWidth: number = Math.min(extent * 0.5,
+    Math.max(0.5, Math.min(3, extent * 0.035)));
+  const inset: number = lineWidth * 0.5;
+  const innerX: number = x + inset;
+  const innerY: number = y + inset;
+  const innerWidth: number = width - inset * 2;
+  const innerHeight: number = height - inset * 2;
+
+  // display_table 自绘底框；dispatch 在本类型提前返回，不再调用 drawBase。
+  // 正交俯视：只画台面，不画桌腿、透视或文字。
+  context.fillStyle = style.fillColor;
+  context.fillRect(x, y, width, height);
+  context.strokeStyle = style.strokeColor;
   context.lineWidth = lineWidth;
-  context.strokeRect(x + width * 0.1, y + height * 0.14,
-    width * 0.8, height * 0.72);
-  const radius: number = Math.max(1.5, Math.min(width, height) * 0.09);
-  fillCircle(context, x + width * 0.28, y + height * 0.5, radius, style.detailColor);
-  fillCircle(context, x + width * 0.5, y + height * 0.5, radius, style.detailColor);
-  fillCircle(context, x + width * 0.72, y + height * 0.5, radius, style.detailColor);
+  context.strokeRect(innerX, innerY, innerWidth, innerHeight);
+
+  // 低 LOD：仅 footprint 内的台面与外框。
+  if (extent < 18) {
+    return;
+  }
+
+  // 中 LOD：内缩一圈描边作为边缘收口；rim 让开线宽，且不超过短边 1/4。
+  const rim: number = Math.min(
+    Math.max(lineWidth, Math.min(innerWidth, innerHeight) * 0.08),
+    innerWidth * 0.25, innerHeight * 0.25);
+  const topX: number = innerX + rim;
+  const topY: number = innerY + rim;
+  const topWidth: number = innerWidth - rim * 2;
+  const topHeight: number = innerHeight - rim * 2;
+  context.strokeStyle = style.strokeColor;
+  context.lineWidth = lineWidth;
+  context.strokeRect(topX, topY, topWidth, topHeight);
+
+  // 中 LOD：沿长边两刀分三段；分隔线线宽减半并改用低对比浅灰绿，
+  // 让台面轮廓与 rim 保持主导，不与中央标签争夺视觉权重。
+  const alongWidth: boolean = width >= height;
+  const dividerWidth: number = Math.max(0.5, lineWidth * 0.5);
+  context.strokeStyle = '#BDCFC5';
+  context.lineWidth = dividerWidth;
+  if (alongWidth) {
+    drawLine(context, topX + topWidth / 3, topY,
+      topX + topWidth / 3, topY + topHeight);
+    drawLine(context, topX + topWidth * 2 / 3, topY,
+      topX + topWidth * 2 / 3, topY + topHeight);
+  } else {
+    drawLine(context, topX, topY + topHeight / 3,
+      topX + topWidth, topY + topHeight / 3);
+    drawLine(context, topX, topY + topHeight * 2 / 3,
+      topX + topWidth, topY + topHeight * 2 / 3);
+  }
+
+  // 18..40 到此为止；>40 才增加少量低对比展品定位点。
+  if (extent <= 40) {
+    return;
+  }
+
+  // 高 LOD：每段仍保留一个定位点，区别于 plinth 的中央单展品；
+  // 圆点显著缩小、改用低对比灰绿，并向 -y 偏移以避开中央标签。
+  const bayWidth: number = alongWidth ? topWidth / 3 : topWidth;
+  const bayHeight: number = alongWidth ? topHeight : topHeight / 3;
+  const itemRadius: number = Math.min(bayWidth, bayHeight) * 0.06;
+  if (!(itemRadius > 0)) {
+    return;
+  }
+  const itemOffset: number = 0.30;
+  for (let i: number = 0; i < 3; i++) {
+    const itemX: number = alongWidth
+      ? topX + bayWidth * (i + 0.5)
+      : topX + topWidth * 0.5;
+    const itemY: number = alongWidth
+      ? topY + topHeight * itemOffset
+      : topY + bayHeight * (i + itemOffset);
+    fillCircle(context, itemX, itemY, itemRadius, '#A7BBB2');
+  }
 }
 
 function drawShelf(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
-  const shelfX: number = x + width * 0.1;
-  const shelfY: number = y + height * 0.12;
-  const shelfWidth: number = width * 0.8;
-  const shelfHeight: number = height * 0.76;
-  context.strokeStyle = style.detailColor;
-  context.lineWidth = lineWidth;
-  context.strokeRect(shelfX, shelfY, shelfWidth, shelfHeight);
-  for (let i = 1; i < 4; i++) {
-    drawLine(context,
-      shelfX + shelfWidth * (i / 4), shelfY,
-      shelfX + shelfWidth * (i / 4), shelfY + shelfHeight);
+  const shortSide: number = Math.min(width, height);
+  const left: number = x + width * 0.045;
+  const back: number = y + height * 0.075;
+  const railWidth: number = width * 0.065;
+  const right: number = x + width * 0.955 - railWidth;
+  const ledgeX: number = left + railWidth;
+  const ledgeY: number = y + height * 0.195;
+  const ledgeWidth: number = right - ledgeX;
+
+  fillRect(context, left, back, width * 0.91, height * 0.12, style.strokeColor);
+  fillRect(context, left, ledgeY, railWidth, height * 0.72, '#4E8074');
+  fillRect(context, right, ledgeY, railWidth, height * 0.72, '#4E8074');
+  fillRect(context, ledgeX, ledgeY, ledgeWidth, height * 0.47, '#D9E7DF');
+
+  // Two flat samples sit on the ledge behind the open visitor edge (+y).
+  const leftSample: number = x + width * 0.19;
+  const rightSample: number = x + width * 0.59;
+  const leftSampleWidth: number = width * 0.24;
+  const rightSampleWidth: number = width * 0.20;
+  fillRect(context, leftSample, y + height * 0.315, leftSampleWidth, height * 0.245, '#8CB3A6');
+  fillRect(context, rightSample, y + height * 0.25, rightSampleWidth, height * 0.28, '#DBB184');
+
+  if (shortSide >= 18) {
+    // Short retaining lips belong to the two individual sample holders.
+    fillRect(context, leftSample, y + height * 0.56, leftSampleWidth, height * 0.06, '#86A99D');
+    fillRect(context, rightSample, y + height * 0.53, rightSampleWidth, height * 0.06, '#86A99D');
   }
-  for (let i = 0; i < 4; i++) {
-    const bookColor: string = i % 2 === 0 ? style.detailColor : style.strokeColor;
-    fillRect(context,
-      shelfX + shelfWidth * (i / 4) + shelfWidth * 0.03,
-      shelfY + shelfHeight * 0.22,
-      shelfWidth * 0.17,
-      shelfHeight * 0.56,
-      bookColor);
+  if (shortSide > 40) {
+    const jointOffset: number = railWidth * 0.24;
+    const jointWidth: number = railWidth * 0.52;
+    const jointY: number = y + height * 0.79;
+    fillRect(context, left + jointOffset, jointY, jointWidth, height * 0.065, '#9BBAAE');
+    fillRect(context, right + jointOffset, jointY, jointWidth, height * 0.065, '#9BBAAE');
   }
 }
 
-function drawInteractiveScreen(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
+function drawInteractiveScreen(context: CanvasRenderingContext2D,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
-  const screenHeight: number = Math.max(2, height * 0.18);
-  fillRect(context, x + width * 0.1, y + height * 0.18,
-    width * 0.8, screenHeight, style.detailColor);
-  context.strokeStyle = style.detailColor;
-  context.lineWidth = lineWidth;
-  const radius: number = Math.max(2, Math.min(width, height) * 0.16);
-  strokeCircle(context, x + width * 0.5, y + height * 0.5, radius);
-  const footRadius: number = Math.max(1.5, Math.min(width, height) * 0.07);
-  fillCircle(context, x + width * 0.22, y + height * 0.78, footRadius, style.detailColor);
-  fillCircle(context, x + width * 0.78, y + height * 0.78, footRadius, style.detailColor);
+  const shortSide: number = Math.min(width, height);
+  const baseLeft: number = x + width * 0.20;
+  const baseRight: number = x + width * 0.80;
+  const baseBack: number = y + height * 0.06;
+  const baseFront: number = y + height * 0.82;
+  const corner: number = shortSide * 0.12;
+
+  context.fillStyle = '#B3CBCB';
+  context.beginPath();
+  context.moveTo(baseLeft + corner, baseBack);
+  context.lineTo(baseRight - corner, baseBack);
+  context.lineTo(baseRight, baseBack + corner);
+  context.lineTo(baseRight, baseFront - corner);
+  context.lineTo(baseRight - corner, baseFront);
+  context.lineTo(baseLeft + corner, baseFront);
+  context.lineTo(baseLeft, baseFront - corner);
+  context.lineTo(baseLeft, baseBack + corner);
+  context.closePath();
+  context.fill();
+
+  // A rear housing supports a glass deck that projects toward the visitor (+y).
+  fillRect(context, x + width * 0.055, y + height * 0.26, width * 0.89, height * 0.33, '#648487');
+  fillRect(context, x + width * 0.16, y + height * 0.32, width * 0.68, height * 0.60, '#6F9691');
+  // The light glass crosses the object centre, where the editor draws its label.
+  fillRect(context, x + width * 0.20, y + height * 0.37, width * 0.60, height * 0.49, '#D9EDEA');
+
+  if (shortSide >= 18) {
+    fillRect(context, x + width * 0.20, y + height * 0.79, width * 0.60, height * 0.07, '#A8CFC6');
+  }
+  if (shortSide > 40) {
+    fillRect(context, x + width * 0.38, y + height * 0.145, width * 0.24, height * 0.065, '#8AA9AA');
+  }
 }
 
 function drawChair(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
-  const backHeight: number = Math.max(2, height * 0.12);
-  fillRect(context, x + width * 0.12, y + height * 0.1,
-    width * 0.76, backHeight, style.detailColor);
+  const extent: number = Math.min(width, height);
+  const lineWidth: number = Math.min(extent * 0.5,
+    Math.max(0.5, Math.min(3, extent * 0.035)));
+  const inset: number = lineWidth * 0.5;
+
+  // Chair owns its base: fill the full footprint, then stroke half a line
+  // width inside so the entire outline remains within the footprint.
+  context.fillStyle = style.fillColor;
+  context.fillRect(x, y, width, height);
+  context.strokeStyle = style.strokeColor;
+  context.lineWidth = lineWidth;
+  context.strokeRect(x + inset, y + inset,
+    width - inset * 2, height - inset * 2);
+
+  // rot 0: backrest at -y, seat faces +y. No rotation here.
+  const seatSize: number = extent * 0.52;
+  const seatX: number = x + (width - seatSize) * 0.5;
+  const seatY: number = y + (height - seatSize) * 0.5 + extent * 0.08;
+
+  if (extent < 18) {
+    // Low LOD: square seat + backrest bar only.
+    fillRect(context, seatX, seatY, seatSize, seatSize, style.detailColor);
+    fillRect(context, seatX, y + inset + extent * 0.04,
+      seatSize, extent * 0.12, style.detailColor);
+    return;
+  }
+
+  const centerX: number = seatX + seatSize * 0.5;
+  const centerY: number = seatY + seatSize * 0.5;
+  const backRadius: number = seatSize * 0.72;
+
+  // Medium/High: square seat outline + backrest arc.
   context.strokeStyle = style.detailColor;
   context.lineWidth = lineWidth;
-  const seatRadius: number = Math.max(2, Math.min(width, height) * 0.29);
-  strokeCircle(context, x + width * 0.5, y + height * 0.58, seatRadius);
-  drawLine(context, x + width * 0.08, y + height * 0.5,
-    x + width * 0.22, y + height * 0.5);
-  drawLine(context, x + width * 0.78, y + height * 0.5,
-    x + width * 0.92, y + height * 0.5);
+  context.strokeRect(seatX, seatY, seatSize, seatSize);
+  context.beginPath();
+  context.arc(centerX, centerY, backRadius,
+    Math.PI * 1.12, Math.PI * 1.88);
+  context.stroke();
+
+  if (extent > 40) {
+    // High LOD: two simple armrests joined to the arc ends.
+    const armOffsetX: number = backRadius * Math.cos(Math.PI * 0.12);
+    const armTopY: number = centerY - backRadius * Math.sin(Math.PI * 0.12);
+    const armBottomY: number = seatY + seatSize * 0.86;
+    drawLine(context, centerX - armOffsetX, armTopY,
+      centerX - armOffsetX, armBottomY);
+    drawLine(context, centerX + armOffsetX, armTopY,
+      centerX + armOffsetX, armBottomY);
+  }
 }
 
 function drawStorage(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
-  const storageX: number = x + width * 0.1;
-  const storageY: number = y + height * 0.12;
-  const storageWidth: number = width * 0.8;
-  const storageHeight: number = height * 0.76;
-  context.strokeStyle = style.detailColor;
-  context.lineWidth = lineWidth;
-  context.strokeRect(storageX, storageY, storageWidth, storageHeight);
-  drawLine(context, storageX + storageWidth * 0.5, storageY,
-    storageX + storageWidth * 0.5, storageY + storageHeight);
-  drawLine(context, storageX, storageY + storageHeight * 0.5,
-    storageX + storageWidth, storageY + storageHeight * 0.5);
-  const handleRadius: number = Math.max(1, Math.min(width, height) * 0.045);
-  const offsetsX: number[] = [0.36, 0.64];
-  const offsetsY: number[] = [0.36, 0.64];
-  for (let i = 0; i < offsetsX.length; i++) {
-    for (let j = 0; j < offsetsY.length; j++) {
-      fillCircle(context,
-        storageX + storageWidth * offsetsX[i],
-        storageY + storageHeight * offsetsY[j],
-        handleRadius, style.detailColor);
-    }
+  const extent: number = Math.min(width, height);
+  const outlineWidth: number = Math.min(extent * 0.12,
+    Math.max(0.5, Math.min(3, extent * 0.035)));
+  const inset: number = outlineWidth * 0.5;
+
+  // Continuous cabinet top. Keep the perimeter stroke inside the footprint.
+  fillRect(context, x, y, width, height, style.fillColor);
+  context.strokeStyle = style.strokeColor;
+  context.lineWidth = outlineWidth;
+  context.strokeRect(x + inset, y + inset, width - outlineWidth, height - outlineWidth);
+
+  // A single closed lid leaves more room at its hinged edge. The filled
+  // silhouette and attached hinges remain visible in the thumbnail.
+  const lidX: number = x + width * 0.12;
+  const lidY: number = y + height * 0.28;
+  const lidWidth: number = width * 0.76;
+  const lidHeight: number = height * 0.56;
+  fillRect(context, lidX, lidY, lidWidth, lidHeight, '#C9D8D2');
+
+  if (extent >= 18) {
+    // A fine seam separates the lid from the top at canvas and catalog scale.
+    context.strokeStyle = '#9DB4AA';
+    context.lineWidth = outlineWidth * 0.58;
+    context.strokeRect(lidX, lidY, lidWidth, lidHeight);
+  }
+
+  const hingeWidth: number = lidWidth * 0.14;
+  const hingeHeight: number = height * 0.10;
+  const hingeY: number = lidY - hingeHeight * 0.5;
+  fillRect(context, lidX + lidWidth * 0.20, hingeY, hingeWidth, hingeHeight, '#79968B');
+  fillRect(context, lidX + lidWidth * 0.66, hingeY, hingeWidth, hingeHeight, '#79968B');
+
+  if (extent > 40) {
+    // Muted highlight just inside the free edge of the lid.
+    const highlightHeight: number = Math.min(1.1, outlineWidth * 0.38);
+    fillRect(context, lidX + lidWidth * 0.20, lidY + lidHeight * 0.88,
+      lidWidth * 0.60, highlightHeight, '#E4EEE8');
   }
 }
 
 function drawSign(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
-  const boardX: number = x + width * 0.12;
-  const boardY: number = y + height * 0.12;
-  const boardWidth: number = width * 0.76;
-  const boardHeight: number = height * 0.5;
-  context.strokeStyle = style.detailColor;
-  context.lineWidth = lineWidth;
-  context.strokeRect(boardX, boardY, boardWidth, boardHeight);
-  drawLine(context,
-    boardX + boardWidth * 0.24, boardY + boardHeight * 0.5,
-    boardX + boardWidth * 0.72, boardY + boardHeight * 0.5);
-  drawLine(context,
-    boardX + boardWidth * 0.54, boardY + boardHeight * 0.28,
-    boardX + boardWidth * 0.72, boardY + boardHeight * 0.5);
-  drawLine(context,
-    boardX + boardWidth * 0.54, boardY + boardHeight * 0.72,
-    boardX + boardWidth * 0.72, boardY + boardHeight * 0.5);
-  const baseRadius: number = Math.max(1.5, Math.min(width, height) * 0.08);
-  fillCircle(context, x + width * 0.5, y + height * 0.82,
-    baseRadius, style.detailColor);
+  const extent: number = Math.min(width, height);
+
+  // All proportions stay positive for extent 0.1 and keep every part,
+  // including its fill, strictly inside the footprint. No strokes are used.
+  const boardWidth: number = width * 0.80;
+  const boardThickness: number = height * 0.14;
+  const boardX: number = x + (width - boardWidth) * 0.5;
+  const boardY: number = y + height * 0.10;
+
+  const postWidth: number = width * 0.10;
+  const postX: number = x + (width - postWidth) * 0.5;
+  const postTop: number = boardY + boardThickness;
+
+  const baseWidth: number = width * 0.42;
+  const baseHeight: number = height * 0.20;
+  const baseX: number = x + (width - baseWidth) * 0.5;
+  const baseY: number = y + height * 0.72;
+  const postHeight: number = baseY - postTop;
+
+  // Neutral footprint fill only; deliberately no enclosing outline.
+  fillRect(context, x, y, width, height, style.fillColor);
+
+  // Back (-y): wide, thin board top projection.
+  fillRect(context, boardX, boardY, boardWidth, boardThickness,
+    style.detailColor);
+
+  // Centre: narrow post connecting board to base.
+  fillRect(context, postX, postTop, postWidth, postHeight, '#6C8783');
+
+  // Front (+y): compact stable base, visibly separate from the post.
+  fillRect(context, baseX, baseY, baseWidth, baseHeight, '#DDE5E0');
+
+  // Low LOD: board/post/base silhouette is sufficient.
+  if (extent < 18) {
+    return;
+  }
+
+  // Medium LOD (18..40): details sized to remain visible at a 22.11 vp
+  // short edge. Board face strip first, then base front edge.
+  const boardFaceHeight: number = Math.min(boardThickness * 0.20,
+    Math.max(0.5, boardThickness * 0.16));
+  fillRect(context, boardX + boardWidth * 0.08,
+    boardY + boardThickness * 0.58,
+    boardWidth * 0.84, boardFaceHeight, '#F8D7AF');
+
+  const baseSeamHeight: number = Math.min(baseHeight * 0.22,
+    Math.max(0.5, baseHeight * 0.12));
+  fillRect(context, baseX + baseWidth * 0.10,
+    baseY + baseHeight * 0.70,
+    baseWidth * 0.80, baseSeamHeight, '#A9BCB6');
+
+  if (extent <= 40) {
+    return;
+  }
+
+  // High LOD (>40): only two subtle connection details, no dots or frames.
+  const collarHeight: number = Math.min(boardThickness * 0.18,
+    Math.max(0.5, boardThickness * 0.12));
+  const collarWidth: number = postWidth * 1.80;
+  fillRect(context, postX + (postWidth - collarWidth) * 0.5,
+    postTop, collarWidth, collarHeight, '#6C8783');
+
+  const postHighlightWidth: number = Math.max(0.5, postWidth * 0.18);
+  fillRect(context, postX + (postWidth - postHighlightWidth) * 0.5,
+    postTop + postHeight * 0.10,
+    postHighlightWidth, postHeight * 0.80, FILL_PAGE);
+}
+
+function fillPlantLeaf(context: CanvasRenderingContext2D,
+  originX: number, originY: number, angle: number,
+  length: number, halfWidth: number, color: string): void {
+  if (!(length > 0) || !(halfWidth > 0)) {
+    return;
+  }
+  const cos: number = Math.cos(angle);
+  const sin: number = Math.sin(angle);
+  const tipX: number = originX + cos * length;
+  const tipY: number = originY + sin * length;
+  const bellyX: number = originX + cos * length * 0.32;
+  const bellyY: number = originY + sin * length * 0.32;
+  const sideX: number = -sin * halfWidth;
+  const sideY: number = cos * halfWidth;
+  context.fillStyle = color;
+  context.beginPath();
+  context.moveTo(originX, originY);
+  context.quadraticCurveTo(bellyX + sideX, bellyY + sideY, tipX, tipY);
+  context.quadraticCurveTo(bellyX - sideX, bellyY - sideY, originX, originY);
+  context.closePath();
+  context.fill();
 }
 
 function drawPlant(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
-  const centerX: number = x + width * 0.5;
-  const centerY: number = y + height * 0.52;
   const extent: number = Math.min(width, height);
-  context.strokeStyle = style.detailColor;
-  context.lineWidth = lineWidth;
-  strokeCircle(context, centerX, centerY, Math.max(2, extent * 0.36));
-  fillCircle(context, centerX, centerY, Math.max(1.5, extent * 0.1), style.detailColor);
-  for (let i = 0; i < 4; i++) {
-    const angle: number = Math.PI * 0.25 + i * Math.PI * 0.5;
-    const leafX: number = centerX + Math.cos(angle) * extent * 0.22;
-    const leafY: number = centerY + Math.sin(angle) * extent * 0.22;
-    fillCircle(context, leafX, leafY, Math.max(1.5, extent * 0.09), style.detailColor);
+  const centerX: number = x + width * 0.5;
+  const centerY: number = y + height * 0.5;
+  const potY: number = centerY + extent * 0.04;
+
+  fillRect(context, x, y, width, height, style.fillColor);
+  fillCircle(context, centerX, potY, extent * 0.31, '#D6B99B');
+  fillCircle(context, centerX, potY, extent * 0.245, '#AA8E71');
+  if (extent >= 18) {
+    context.strokeStyle = '#8E785F';
+    context.lineWidth = Math.min(extent * 0.02, 1.4);
+    strokeCircle(context, centerX, potY, extent * 0.31);
+  }
+
+  // 错开叶柄位置，保留左下方露出的土面。
+  fillPlantLeaf(context, centerX - extent * 0.065, centerY + extent * 0.035,
+    -2.50, extent * 0.35, extent * 0.145, '#55835E');
+  fillPlantLeaf(context, centerX + extent * 0.045, centerY + extent * 0.015,
+    -1.22, extent * 0.415, extent * 0.165, '#316A51');
+  fillPlantLeaf(context, centerX - extent * 0.015, centerY + extent * 0.09,
+    0.44, extent * 0.45, extent * 0.20, '#67986D');
+
+  if (extent > 40) {
+    context.strokeStyle = '#86AD83';
+    context.lineWidth = Math.min(extent * 0.012, 1.25);
+    drawLine(context, centerX + extent * 0.073, centerY - extent * 0.06,
+      centerX + extent * 0.15, centerY - extent * 0.27);
+    context.strokeStyle = '#99B895';
+    drawLine(context, centerX + extent * 0.06, centerY + extent * 0.127,
+      centerX + extent * 0.29, centerY + extent * 0.233);
   }
 }
 
 function drawPlinth(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
   const extent: number = Math.min(width, height);
-  const inset: number = extent * 0.2;
-  context.strokeStyle = style.detailColor;
+  const lineWidth: number = Math.min(extent * 0.18,
+    Math.max(0.5, Math.min(3, extent * 0.035)));
+  const inset: number = lineWidth * 0.5;
+  const centerX: number = x + width * 0.5;
+  const centerY: number = y + height * 0.5;
+  const exhibitY: number = centerY - extent * 0.14;
+
+  fillRect(context, x, y, width, height, style.fillColor);
+  if (extent >= 18) {
+    const rim: number = extent * 0.085;
+    fillRect(context, x + rim, y + rim, width - rim * 2, height - rim * 2,
+      FILL_WHITE);
+  }
+  context.strokeStyle = style.strokeColor;
   context.lineWidth = lineWidth;
-  context.strokeRect(x + inset, y + inset,
-    width - inset * 2, height - inset * 2);
-  const exhibitSize: number = Math.max(2, extent * 0.18);
-  fillRect(context,
-    x + width * 0.5 - exhibitSize * 0.5,
-    y + height * 0.5 - exhibitSize * 0.5,
-    exhibitSize, exhibitSize, style.detailColor);
-  const tick: number = Math.max(2, extent * 0.08);
-  const cornerInsetX: number = x + inset * 0.4;
-  const cornerInsetY: number = y + inset * 0.4;
-  drawLine(context, cornerInsetX, cornerInsetY, cornerInsetX + tick, cornerInsetY);
-  drawLine(context, cornerInsetX, cornerInsetY, cornerInsetX, cornerInsetY + tick);
-  drawLine(context, x + width - cornerInsetX, cornerInsetY,
-    x + width - cornerInsetX - tick, cornerInsetY);
-  drawLine(context, x + width - cornerInsetX, cornerInsetY,
-    x + width - cornerInsetX, cornerInsetY + tick);
+  context.strokeRect(x + inset, y + inset, width - lineWidth, height - lineWidth);
+
+  // 浅色托座与单件展品在低档同样保留，中央标签区域留浅底。
+  fillRect(context, centerX - extent * 0.24, exhibitY - extent * 0.17,
+    extent * 0.48, extent * 0.34, '#DFE7E1');
+  context.fillStyle = '#C99660';
+  context.beginPath();
+  context.moveTo(centerX - extent * 0.145, exhibitY - extent * 0.027);
+  context.lineTo(centerX - extent * 0.065, exhibitY - extent * 0.115);
+  context.lineTo(centerX + extent * 0.075, exhibitY - extent * 0.103);
+  context.lineTo(centerX + extent * 0.151, exhibitY - extent * 0.016);
+  context.lineTo(centerX + extent * 0.094, exhibitY + extent * 0.095);
+  context.lineTo(centerX - extent * 0.103, exhibitY + extent * 0.091);
+  context.closePath();
+  context.fill();
+
+  if (extent > 40) {
+    context.strokeStyle = '#F0D2AA';
+    context.lineWidth = Math.min(extent * 0.015, 1.3);
+    drawLine(context, centerX - extent * 0.062, exhibitY - extent * 0.062,
+      centerX + extent * 0.061, exhibitY - extent * 0.053);
+  }
 }
 
 function drawRollup(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  const lineWidth: number = Math.max(1, Math.min(3, Math.min(width, height) * 0.035));
   const extent: number = Math.min(width, height);
-  const baseY: number = y + height * 0.72;
-  const baseHeight: number = Math.max(2, height * 0.14);
-  fillRect(context, x + width * 0.08, baseY,
-    width * 0.84, baseHeight, style.detailColor);
-  const footRadius: number = Math.max(1.5, extent * 0.07);
-  fillCircle(context, x + width * 0.08, baseY + baseHeight * 0.5,
-    footRadius, style.detailColor);
-  fillCircle(context, x + width * 0.92, baseY + baseHeight * 0.5,
-    footRadius, style.detailColor);
-  context.strokeStyle = style.strokeColor;
-  context.lineWidth = lineWidth;
-  drawLine(context,
-    x + width * 0.16, baseY,
-    x + width * 0.84, y + height * 0.18);
-  fillCircle(context, x + width * 0.84, y + height * 0.18,
-    Math.max(1.5, extent * 0.07), style.detailColor);
+  const detailed: boolean = extent >= 18;
+
+  // 中性 footprint 底色，仅填充、不描外框，避免“通用矩形框”观感。
+  fillRect(context, x, y, width, height, style.fillColor);
+
+  // 长横向卷轴底盒，靠近 +y；所有比例均为正数，微小 extent 下也成立。
+  const cassetteWidth: number = width * 0.86;
+  const cassetteHeight: number = height * 0.22;
+  const cassetteX: number = x + (width - cassetteWidth) * 0.5;
+  const cassetteY: number = y + height * 0.70;
+  const cassetteEdge: number = Math.min(cassetteHeight * 0.16,
+    cassetteWidth * 0.012);
+  const cassetteInnerWidth: number = cassetteWidth - cassetteEdge * 2;
+  const cassetteInnerHeight: number = cassetteHeight - cassetteEdge * 2;
+
+  // -y 方向仅保留很薄的海报上缘投影，不画面板正面。
+  const posterWidth: number = width * 0.78;
+  const posterThickness: number = height * 0.07;
+  const posterX: number = x + (width - posterWidth) * 0.5;
+  const posterY: number = y + height * 0.18;
+
+  // 轻量中央连接件：窄条连接海报上缘与卷轴底盒。
+  const connectionWidth: number = width * 0.04;
+  const connectionX: number = x + (width - connectionWidth) * 0.5;
+  const connectionTop: number = posterY + posterThickness;
+  const connectionHeight: number = cassetteY - connectionTop;
+
+  // 两只小型稳定脚，位于卷轴前缘（+y），整体留在 footprint 内。
+  const footWidth: number = width * 0.06;
+  const footHeight: number = height * 0.06;
+  const footY: number = cassetteY + cassetteHeight;
+  const footLeftX: number = cassetteX + cassetteWidth * 0.06;
+  const footRightX: number = cassetteX + cassetteWidth * 0.94 - footWidth;
+
+  fillRect(context, posterX, posterY, posterWidth, posterThickness, '#247C72');
+  if (connectionHeight > 0) {
+    fillRect(context, connectionX, connectionTop, connectionWidth,
+      connectionHeight, '#DDE5E0');
+  }
+
+  // 底盒本体：细绿边 + 浅灰绿面；不用描边，因此永不溢出。
+  fillRect(context, cassetteX, cassetteY, cassetteWidth, cassetteHeight,
+    '#247C72');
+  fillRect(context, cassetteX + cassetteEdge, cassetteY + cassetteEdge,
+    cassetteInnerWidth, cassetteInnerHeight, '#DDE5E0');
+
+  fillRect(context, footLeftX, footY, footWidth, footHeight, '#247C72');
+  fillRect(context, footRightX, footY, footWidth, footHeight, '#247C72');
+
+  // 低 LOD：卷轴底盒 + 海报上缘 + 中央连接 + 稳定脚已足够识别。
+  if (!detailed) {
+    return;
+  }
+
+  // 中 LOD：底盒上的回卷槽 + 中央连接座，明确“可回卷”结构。
+  const slotWidth: number = cassetteInnerWidth * 0.88;
+  const slotHeight: number = cassetteInnerHeight * 0.14;
+  const slotX: number = cassetteX + cassetteEdge +
+    (cassetteInnerWidth - slotWidth) * 0.5;
+  const slotY: number = cassetteY + cassetteEdge +
+    cassetteInnerHeight * 0.32;
+  fillRect(context, slotX, slotY, slotWidth, slotHeight, '#F7F8F4');
+
+  const collarWidth: number = connectionWidth * 2.0;
+  const collarHeight: number = cassetteHeight * 0.16;
+  const collarX: number = x + (width - collarWidth) * 0.5;
+  fillRect(context, collarX, cassetteY, collarWidth, collarHeight, '#247C72');
+
+  // 18..40 到此为止。
+  if (extent <= 40) {
+    return;
+  }
+
+  // 高 LOD：仅补两端低对比端帽和一处小连接点，不再增加结构线。
+  const capWidth: number = cassetteWidth * 0.025;
+  const capHeight: number = cassetteInnerHeight * 0.72;
+  const capY: number = cassetteY + cassetteEdge +
+    (cassetteInnerHeight - capHeight) * 0.5;
+  fillRect(context, cassetteX + cassetteWidth * 0.08, capY,
+    capWidth, capHeight, '#F7F8F4');
+  fillRect(context, cassetteX + cassetteWidth * 0.92 - capWidth, capY,
+    capWidth, capHeight, '#F7F8F4');
+
+  const jointRadius: number = Math.min(connectionWidth * 0.45,
+    posterThickness * 0.55, cassetteHeight * 0.10);
+  fillCircle(context, x + width * 0.5, connectionTop, jointRadius, '#247C72');
 }
 
 function drawGeneric(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
@@ -439,30 +804,48 @@ function drawGeneric(context: CanvasRenderingContext2D, style: ObjectVisualStyle
 
 function drawShape(context: CanvasRenderingContext2D, style: ObjectVisualStyle,
   x: number, y: number, width: number, height: number): void {
-  drawBase(context, style, x, y, width, height);
+  if (style.shape === 'chair') {
+    drawChair(context, style, x, y, width, height);
+    return;
+  }
+  if (style.shape === 'storage') {
+    drawStorage(context, style, x, y, width, height);
+    return;
+  }
+  if (style.shape === 'sign') {
+    drawSign(context, style, x, y, width, height);
+    return;
+  }
+  if (style.shape === 'rollup') {
+    drawRollup(context, style, x, y, width, height);
+    return;
+  }
+  if (style.shape === 'plant') {
+    drawPlant(context, style, x, y, width, height);
+    return;
+  }
+  if (style.shape === 'plinth') {
+    drawPlinth(context, style, x, y, width, height);
+    return;
+  }
+  if (style.shape === 'display_table') {
+    drawDisplayTable(context, style, x, y, width, height);
+    return;
+  }
   if (style.shape === 'reception') {
     drawReception(context, style, x, y, width, height);
-  } else if (style.shape === 'display_table') {
-    drawDisplayTable(context, style, x, y, width, height);
-  } else if (style.shape === 'shelf') {
-    drawShelf(context, style, x, y, width, height);
-  } else if (style.shape === 'interactive_screen') {
-    drawInteractiveScreen(context, style, x, y, width, height);
-  } else if (style.shape === 'chair') {
-    drawChair(context, style, x, y, width, height);
-  } else if (style.shape === 'storage') {
-    drawStorage(context, style, x, y, width, height);
-  } else if (style.shape === 'sign') {
-    drawSign(context, style, x, y, width, height);
-  } else if (style.shape === 'plant') {
-    drawPlant(context, style, x, y, width, height);
-  } else if (style.shape === 'plinth') {
-    drawPlinth(context, style, x, y, width, height);
-  } else if (style.shape === 'rollup') {
-    drawRollup(context, style, x, y, width, height);
-  } else {
-    drawGeneric(context, style, x, y, width, height);
+    return;
   }
+  if (style.shape === 'shelf') {
+    drawShelf(context, style, x, y, width, height);
+    return;
+  }
+  if (style.shape === 'interactive_screen') {
+    drawInteractiveScreen(context, x, y, width, height);
+    return;
+  }
+  drawBase(context, style, x, y, width, height);
+  drawGeneric(context, style, x, y, width, height);
 }
 
 /**
