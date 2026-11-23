@@ -40,4 +40,15 @@ $hvigor = Join-Path $devecoInstall 'tools\hvigor\bin\hvigorw.bat'
 
 ## 安装与签名
 
-当前工程的 signingConfigs 数组为空。指定 API 17 Phone 专用模拟器已验证 debug unsigned HAP 的安装、启动和核心操作。换用其他设备时，请按该设备和平台要求配置签名，再使用 DevEco Studio 部署。[测试范围](TESTING.md) · [已知限制](LIMITATIONS.md)
+当前工程的 signingConfigs 数组为空。指定 API 17 Phone 专用模拟器已验证 debug unsigned HAP 的安装、启动和核心操作。换用其他设备时，先确认目标环境与工程 API 17 SDK 配置兼容。若目标设备要求签名，请在 DevEco Studio 配置签名，再构建并部署。[测试范围](TESTING.md) · [已知限制](LIMITATIONS.md)
+
+## 常见运行问题
+
+| 现象 | 核对方法 |
+| --- | --- |
+| SDK 未配置或找不到构建目标 | 确认已安装并配置 HarmonyOS API 17 SDK。核对 [build-profile.json5](../build-profile.json5) 中的 product default、module entry、target default 和 debug 模式。 |
+| OHPM 依赖尚未解析 | 在工程根目录同步 OHPM，或按上面的命令执行 ohpm install，核对锁定依赖是否安装成功。 |
+| 离线缓存缺失 | 先完成依赖同步，并确认 Hvigor 插件和依赖缓存可用，再加上 --offline 执行构建。 |
+| 命令行构建参数不匹配 | 对照上面的 assembleHap 命令，核对 --mode module、product=default、module=entry@default 和 buildMode=debug。 |
+| 目标设备拒绝安装 unsigned HAP | 按[安装与签名](#安装与签名)核对目标设备要求及工程部署配置。 |
+| PlanLibrary 重复组件 ID 警告 | 此前构建记录过该警告，正式设备验收未观察到对应运行时故障。详见[已知限制](LIMITATIONS.md)。 |

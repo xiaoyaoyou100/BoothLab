@@ -15,9 +15,9 @@ BoothLab 是一款 HarmonyOS 校园社团展位布局编辑应用，对应课程
 
 来自 HarmonyOS API 17 Phone 模拟器的验收原图。点击图片可查看原始尺寸。其余画面见[截图与演示脚本](docs/DEMO.md)。
 
-| 方案库首页 | 模板选择 | 物件目录 |
+| 方案库首页 | 标准型模板 | 物件目录 |
 | --- | --- | --- |
-| <a href="docs/screenshots/01-library-home.png"><img src="docs/screenshots/01-library-home.png" width="200" alt="首次启动方案库"></a> | <a href="docs/screenshots/02-standard-template.png"><img src="docs/screenshots/02-standard-template.png" width="200" alt="标准型与转角型模板"></a> | <a href="docs/screenshots/04-object-catalog.png"><img src="docs/screenshots/04-object-catalog.png" width="200" alt="物件目录全部分类"></a> |
+| <a href="docs/screenshots/01-library-home.png"><img src="docs/screenshots/01-library-home.png" width="200" alt="首次启动方案库"></a> | <a href="docs/screenshots/02-standard-template.png"><img src="docs/screenshots/02-standard-template.png" width="200" alt="模板选择表单，已选中标准型"></a> | <a href="docs/screenshots/04-object-catalog.png"><img src="docs/screenshots/04-object-catalog.png" width="200" alt="物件目录全部分类"></a> |
 
 | 90° 旋转 | 入口提醒 | 250% 视口 |
 | --- | --- | --- |
@@ -26,6 +26,8 @@ BoothLab 是一款 HarmonyOS 校园社团展位布局编辑应用，对应课程
 | 三份方案 | 重开十件布局 | 重启后续编 |
 | --- | --- | --- |
 | <a href="docs/screenshots/08-three-plans.png"><img src="docs/screenshots/08-three-plans.png" width="200" alt="三份方案及缩略图"></a> | <a href="docs/screenshots/09-reopened-layout.png"><img src="docs/screenshots/09-reopened-layout.png" width="200" alt="重开已保存的十类物件布局"></a> | <a href="docs/screenshots/10-recovery.png"><img src="docs/screenshots/10-recovery.png" width="200" alt="进程重启后继续编辑"></a> |
+
+标准型下侧开放。[转角型模板截图](docs/screenshots/03-corner-template.png)展示右侧和下侧两条开放边。
 
 ## 技术栈与工程结构
 
@@ -45,6 +47,7 @@ entry/src/main/ets/
   storage/                       Preferences 适配
 entry/src/test/                  宿主测试源码
 entry/src/ohosTest/              独立设备测试目标
+软件需求说明书/                    课程软件需求说明书原件
 docs/                            技术文档与设备截图
 ~~~
 
@@ -52,7 +55,8 @@ docs/                            技术文档与设备截图
 
 1. 克隆仓库，用 DevEco Studio 打开工程根目录并同步 OHPM 依赖。
 2. 配置 HarmonyOS API 17 SDK。选择模块 entry、产品 default 和 debug 构建模式。
-3. 在 API 17 Phone 模拟器运行，打开方案库并创建一个展位方案。选择物件后可拖动、旋转或删除。保存后可从库中打开同一方案。
+3. 执行 debug 构建。正式验收使用 HarmonyOS API 17 Phone 模拟器。其他设备须满足工程的 SDK 兼容条件及目标设备的签名要求，按需为 unsigned HAP 配置签名后再部署。
+4. 启动应用进入方案库，输入名称并选择模板，新建展位方案。添加物件后可拖动、旋转或删除。保存后从方案库重开并继续编辑。
 
 [运行指南与签名说明](docs/GETTING_STARTED.md)
 
@@ -67,6 +71,8 @@ docs/                            技术文档与设备截图
 - 郑鑫越（xiaoyaoyou100）负责 Canvas 编辑器、几何与碰撞、撤销重做、视口和系统集成。
 - 贾云翔（jiayunxiang123）负责展位模板、物件目录和十类视觉、方案管理、Preferences 持久化与恢复。
 
+两名成员使用自己的 GitHub 账号提交代码，通过 GitHub PR 集成模块。UX 阶段的代表提交包括郑鑫越的[编辑器与视口调整](https://github.com/xiaoyaoyou100/BoothLab/commit/1ddd688da97fb359505bf19589c6edd862f5fc0f)和贾云翔的[目录、视觉与方案库优化](https://github.com/xiaoyaoyou100/BoothLab/commit/3397f572851c14e26ac1eeb8bc5d27363e224582)。
+
 [成员提交与职责](docs/CONTRIBUTORS.md) · [已合并的 UX PR #8](https://github.com/xiaoyaoyou100/BoothLab/pull/8)
 
 ## 文档与使用边界
@@ -74,3 +80,7 @@ docs/                            技术文档与设备截图
 [软件需求说明书](软件需求说明书/软件需求说明书.docx) · [系统架构](docs/ARCHITECTURE.md) · [功能说明](docs/FEATURES.md) · [演示脚本](docs/DEMO.md) · [已知限制](docs/LIMITATIONS.md)
 
 课程验收覆盖指定 API 17 Phone。视觉专项有部分覆盖，设备破坏性恢复、真实多指并发、大字体及 Tablet／2in1 未执行。验收制品是 debug unsigned HAP。
+
+## 许可证
+
+当前版本没有独立的 LICENSE 文件，项目尚未在 README 中声明开源许可证。

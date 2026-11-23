@@ -12,7 +12,12 @@ flowchart TD
     IDX --> SAVE["SaveCoordinator"]
     IDX --> REB["RebuildCoordinator"]
     IDX --> REPO["PlanRepository"]
-    SAVE --> REPO
+    SAVE -.->|"通过接口保存"| PORT["PlanRepositoryPort"]
+    REPO -.->|"实现接口"| PORT
+    IDX -.->|"持有并传递方案"| PLAN["BoothPlan"]
+    WS -.->|"接收并回传方案"| PLAN
+    REPO -.->|"创建、读取和保存方案"| PLAN
+    SAVE -.->|"绑定和更新草稿"| PLAN
     REB -->|"由 Index 绑定回调"| REPO
     REPO --> SER["PlanSerializer / PlanValidator"]
     REPO --> PREF["PreferencesStore"]
@@ -20,7 +25,15 @@ flowchart TD
     WS --> PICK["ObjectCatalogPicker"]
     LIB --> CARD["TemplateCard"]
     LIB --> THUMB["PlanThumbnail"]
+    class WS,CTRL editor
+    class LIB,REPO,PREF,SER,PICK,CARD,THUMB library
+    class EA,IDX,SAVE,REB,PLAN,PORT shared
+    classDef editor fill:#dbeafe,stroke:#2563eb,color:#172554
+    classDef library fill:#dcfce7,stroke:#15803d,color:#052e16
+    classDef shared fill:#f1f5f9,stroke:#475569,color:#0f172a
 ~~~
+
+蓝色标注郑鑫越负责的编辑器与控制器，绿色标注贾云翔负责的方案库、目录和持久化模块，灰色标注应用集成与共享契约。实线表示页面调用或组件关系，虚线表示数据类型或接口依赖。
 
 | 职责 | 实现位置 | 成员 |
 | --- | --- | --- |
@@ -28,7 +41,15 @@ flowchart TD
 | Canvas、坐标、交互和校验 | [EditorWorkspace](../entry/src/main/ets/components/editor/EditorWorkspace.ets)、[EditorController](../entry/src/main/ets/engine/EditorController.ets)、[GeometryEngine](../entry/src/main/ets/engine/GeometryEngine.ets)、[LayoutValidator](../entry/src/main/ets/engine/LayoutValidator.ets)、[EditorViewTransform](../entry/src/main/ets/components/editor/EditorViewTransform.ets) | 郑鑫越 |
 | 模板、目录、缩略图和俯视图 | [BoothTemplates](../entry/src/main/ets/catalog/BoothTemplates.ets)、[ObjectCatalogData](../entry/src/main/ets/catalog/ObjectCatalogData.ets)、[ObjectVisuals](../entry/src/main/ets/components/catalog/ObjectVisuals.ets)、[PlanThumbnail](../entry/src/main/ets/components/plan/PlanThumbnail.ets) | 贾云翔 |
 | 命名、预览、保存与恢复 | [PlanLibrary](../entry/src/main/ets/components/plan/PlanLibrary.ets)、[PlanRepository](../entry/src/main/ets/repository/PlanRepository.ets)、[PreferencesStore](../entry/src/main/ets/storage/PreferencesStore.ets) | 贾云翔负责库与存储，郑鑫越负责编辑和恢复界面集成 |
-| 公共契约 | [BoothModels](../entry/src/main/ets/model/BoothModels.ets)、[M2Contracts](../entry/src/main/ets/model/M2Contracts.ets) | 编辑与存储共用 BoothPlan、PlanStore、OperationResult 和 PlanRepositoryPort |
+| 公共契约 | [BoothModels](../entry/src/main/ets/model/BoothModels.ets)、[M2Contracts](../entry/src/main/ets/model/M2Contracts.ets) | BoothPlan 表示展位方案数据，PlanRepositoryPort 定义方案仓库接口。 |
+
+## 创建和加载方案
+
+1. 从方案库新建时，创建回调交给 [Index.handleCreate](../entry/src/main/ets/pages/Index.ets#L567)。它先调用 [PlanRepository.createPlan](../entry/src/main/ets/repository/PlanRepository.ets#L860)。仓库去除名称首尾空白、核对模板，并持久化物件列表为空的新方案。
+2. 创建成功后，Index 通过 [openPlan](../entry/src/main/ets/repository/PlanRepository.ets#L908) 打开新方案。重开已有方案从 [Index.handleOpen](../entry/src/main/ets/pages/Index.ets#L598) 进入，同样由 openPlan 保存当前方案 ID 并返回方案副本。
+3. 打开成功后，Index 调用 [enterEditor](../entry/src/main/ets/pages/Index.ets#L657)，用 [SaveCoordinator.bind](../entry/src/main/ets/application/SaveCoordinator.ets#L52) 绑定方案。草稿可用后，页面切到编辑器。
+
+目录选择经 EditorWorkspace 交给 EditorController。放置校验通过后，物件加入方案并形成一条历史记录。撤销或重做恢复相应的物件状态并重新计算布局问题。有效编辑、撤销和重做都会更新编辑会话及协调器草稿。持久化写入由手动保存或离页保存触发。
 
 ## 编辑操作数据流
 
